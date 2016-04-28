@@ -1,6 +1,7 @@
 
 use rustc::mir::repr::*;
 use rustc::mir::mir_map::MirMap;
+use rustc::hir::def_id::DefId;
 
 use rustc::ty::TyCtxt;
 
@@ -11,12 +12,19 @@ pub enum OpCode<'tcx>{
 
     STORE_VAR(u32),
     CONSUME_VAR(u32),
+    LOAD_VAR(u32),
 
     STORE_TMP(u32),
     CONSUME_TMP(u32),
+    LOAD_TMP(u32),
+
     CONSUME_ARG(u32),
+    LOAD_ARG(u32),
 
     LOAD_CONST(Constant<'tcx>),
+    LOAD_STATIC(DefId),
+
+    BORROW(BorrowKind),
 
     BINOP(BinOp),
 
@@ -25,7 +33,10 @@ pub enum OpCode<'tcx>{
     GOTO_IF(BasicBlock),
     RETURN,
 
-    TODO
+    TUPLE(usize),
+    VEC(usize),
+
+    TODO(&'static str)
 }
 
 struct FuncGen<'a> {
@@ -71,13 +82,18 @@ impl<'a> BlockGen<'a> {
     fn analyse_terminator(&mut self, terminator: &Terminator<'a>) {
         let op = match terminator.kind {
             TerminatorKind::Goto{target} => OpCode::GOTO(target),
-            TerminatorKind::If{ref cond, ref targets} => {
+            TerminatorKind::If{ref cond, targets: (ref bb1, ref bb2)} => {
                 self.rvalue_operand(cond);
-                self.opcodes.push(OpCode::GOTO_IF(targets.0));
-                OpCode::GOTO(targets.1)
+                self.opcodes.push(OpCode::GOTO_IF(*bb1));
+                OpCode::GOTO(*bb2)
             },
             TerminatorKind::Return => OpCode::RETURN,
-            _ => OpCode::NONE,
+
+            TerminatorKind::Call{ref func, ..} => {
+                self.rvalue_operand(func);
+                OpCode::TODO("Call")
+            }
+            _ => OpCode::TODO("Terminator"),
         };
         self.opcodes.push(op);
     }
@@ -91,7 +107,7 @@ impl<'a> BlockGen<'a> {
                 OpCode::STORE_TMP(n.clone())
             },
             _ => {
-                OpCode::NONE
+                OpCode::TODO("Lvalue")
             }
         });
     }
@@ -106,7 +122,25 @@ impl<'a> BlockGen<'a> {
                 self.rvalue_operand(right);
                 self.opcodes.push(OpCode::BINOP(op));
             },
-            _ => {},
+            &Rvalue::Aggregate(ref kind, ref vec) => {
+                match kind {
+                    &AggregateKind::Tuple => {
+                        self.opcodes.push(OpCode::TUPLE(vec.len()));
+                    },
+                    &AggregateKind::Vec => {
+                        self.opcodes.push(OpCode::VEC(vec.len()));
+                    },
+                    _ => {
+                        self.opcodes.push(OpCode::TODO("AggrKind"));
+                    },
+                }
+            },
+            &Rvalue::Ref(ref region, ref kind, ref lvalue) => {
+                let opcode = self.load_lvalue(lvalue);
+                self.opcodes.push(opcode);
+                self.opcodes.push(OpCode::BORROW(*kind));
+            },
+            _ => {self.opcodes.push(OpCode::TODO("Rvalue"))},
         }
     }
 
@@ -116,6 +150,12 @@ impl<'a> BlockGen<'a> {
                 self.consume_lvalue(lvalue)
             },
             &Operand::Constant(ref constant) => {
+                // if let Literal::Item{ ref def_id, .. } = constant.literal {
+                    // println!("literal");
+                    // if let &ConstVal::Function(def_id) = value {
+                        // println!("XXX: {:?} {}", def_id, def_id.index.as_u32());
+                    // }
+                // }
                 OpCode::LOAD_CONST(constant.clone())
             }
         };
@@ -134,7 +174,22 @@ impl<'a> BlockGen<'a> {
             &Lvalue::Var(n) => OpCode::CONSUME_VAR(n),
             &Lvalue::Temp(n) => OpCode::CONSUME_TMP(n),
             &Lvalue::Arg(n) => OpCode::CONSUME_ARG(n),
-            _ => OpCode::TODO
+            _ => OpCode::TODO("Consume Lvalue")
+        }
+    }
+
+    fn load_lvalue(&self, lvalue: &Lvalue<'a>) -> OpCode<'a> {
+        match lvalue {
+            &Lvalue::Var(n) => OpCode::LOAD_VAR(n),
+            &Lvalue::Temp(n) => OpCode::LOAD_TMP(n),
+            &Lvalue::Arg(n) => OpCode::LOAD_ARG(n),
+            &Lvalue::Static(def_id) => OpCode::LOAD_STATIC(def_id),
+            &Lvalue::Projection(ref proj) => {
+                println!("P: {:?}", proj.base);
+                println!("E: {:?}", proj.elem);
+                OpCode::TODO("Projection")
+            },
+            _ => OpCode::TODO("Load Lvalue")
         }
     }
 
