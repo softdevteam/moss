@@ -6,7 +6,7 @@ use rustc::ty::TyCtxt;
 
 #[derive(Debug)]
 #[allow(non_camel_case_types)]
-enum Command<'tcx>{
+pub enum OpCode<'tcx>{
     NONE,
 
     STORE_VAR(u32),
@@ -14,32 +14,52 @@ enum Command<'tcx>{
 
     STORE_TMP(u32),
     CONSUME_TMP(u32),
+    CONSUME_ARG(u32),
 
     LOAD_CONST(Constant<'tcx>),
 
     BINOP(BinOp),
+
+    //Terminator
+    GOTO(BasicBlock),
+    GOTO_IF(BasicBlock),
+    RETURN,
+
+    TODO
 }
 
 struct FuncGen<'a> {
-    commands: Vec<Command<'a>>
+    blocks: Vec<Vec<OpCode<'a>>>
 }
-
 
 impl<'a> FuncGen<'a> {
     fn new() -> FuncGen<'a> {
-        FuncGen{ commands: Vec::new() }
+        FuncGen{ blocks: Vec::new() }
     }
 
     fn analyse(&mut self, func: &Mir<'a>) {
         for block in &func.basic_blocks {
-            self.analyse_block(block);
+            let mut bg = BlockGen::new();
+            bg.analyse_block(block);
+            self.blocks.push(bg.opcodes);
         }
+    }
+}
+
+struct BlockGen<'a> {
+    opcodes: Vec<OpCode<'a>>
+}
+
+impl<'a> BlockGen<'a> {
+    fn new() -> BlockGen<'a> {
+        BlockGen{ opcodes: Vec::new() }
     }
 
     fn analyse_block(&mut self, block: &BasicBlockData<'a>) {
         for statement in &block.statements {
             self.analyse_statement(statement);
         }
+        self.analyse_terminator(block.terminator());
     }
 
     fn analyse_statement(&mut self, statement: &Statement<'a>) {
@@ -48,16 +68,30 @@ impl<'a> FuncGen<'a> {
         self.handle_lvalue(lvalue);
     }
 
+    fn analyse_terminator(&mut self, terminator: &Terminator<'a>) {
+        let op = match terminator.kind {
+            TerminatorKind::Goto{target} => OpCode::GOTO(target),
+            TerminatorKind::If{ref cond, ref targets} => {
+                self.rvalue_operand(cond);
+                self.opcodes.push(OpCode::GOTO_IF(targets.0));
+                OpCode::GOTO(targets.1)
+            },
+            TerminatorKind::Return => OpCode::RETURN,
+            _ => OpCode::NONE,
+        };
+        self.opcodes.push(op);
+    }
+
     fn handle_lvalue(&mut self, lvalue: &Lvalue) {
-        self.commands.push(match lvalue {
+        self.opcodes.push(match lvalue {
             &Lvalue::Var(n) => {
-                Command::STORE_VAR(n)
+                OpCode::STORE_VAR(n)
             },
             &Lvalue::Temp(ref n) => {
-                Command::STORE_TMP(n.clone())
+                OpCode::STORE_TMP(n.clone())
             },
             _ => {
-                Command::NONE
+                OpCode::NONE
             }
         });
     }
@@ -70,7 +104,7 @@ impl<'a> FuncGen<'a> {
             &Rvalue::BinaryOp(op, ref left, ref right) => {
                 self.rvalue_operand(left);
                 self.rvalue_operand(right);
-                self.commands.push(Command::BINOP(op));
+                self.opcodes.push(OpCode::BINOP(op));
             },
             _ => {},
         }
@@ -82,10 +116,10 @@ impl<'a> FuncGen<'a> {
                 self.consume_lvalue(lvalue)
             },
             &Operand::Constant(ref constant) => {
-                Command::LOAD_CONST(constant.clone())
+                OpCode::LOAD_CONST(constant.clone())
             }
         };
-        self.commands.push(cmd);
+        self.opcodes.push(cmd);
 
     }
 
@@ -95,11 +129,12 @@ impl<'a> FuncGen<'a> {
     ///
     /// This function is similar to handle_lvalue, but instead of storing data
     /// objects are loaded.
-    fn consume_lvalue(&self, lvalue: &Lvalue<'a>) -> Command<'a> {
+    fn consume_lvalue(&self, lvalue: &Lvalue<'a>) -> OpCode<'a> {
         match lvalue {
-            &Lvalue::Var(n) => Command::CONSUME_VAR(n.clone()),
-            &Lvalue::Temp(n) => Command::CONSUME_TMP(n.clone()),
-            _ => Command::NONE
+            &Lvalue::Var(n) => OpCode::CONSUME_VAR(n),
+            &Lvalue::Temp(n) => OpCode::CONSUME_TMP(n),
+            &Lvalue::Arg(n) => OpCode::CONSUME_ARG(n),
+            _ => OpCode::TODO
         }
     }
 
@@ -120,7 +155,9 @@ pub fn generate_bytecode(_tcx: &TyCtxt, map: &MirMap) {
         if let Some(func_mir) = map.map.get(key) {
             let mut collector = FuncGen::new();
             collector.analyse(&func_mir);
-            println!("CRUSTY {:?}", collector.commands);
+            for (i, block) in collector.blocks.iter().enumerate() {
+                println!("{} {:?}", i, block);
+            }
         }
     }
 }
