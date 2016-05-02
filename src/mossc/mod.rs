@@ -26,12 +26,17 @@ pub enum OpCode<'tcx>{
 
     BORROW(BorrowKind),
 
+    DEREF,
+
     BINOP(BinOp),
+
+    RETURN_POINTER,
 
     //Terminator
     GOTO(BasicBlock),
     GOTO_IF(BasicBlock),
     RETURN,
+    RESUME,
 
     TUPLE(usize),
     VEC(usize),
@@ -88,11 +93,19 @@ impl<'a> BlockGen<'a> {
                 OpCode::GOTO(*bb2)
             },
             TerminatorKind::Return => OpCode::RETURN,
+            TerminatorKind::Resume => OpCode::RESUME,
 
             TerminatorKind::Call{ref func, ..} => {
                 self.rvalue_operand(func);
+                self.opcodes.push(OpCode::TODO("Load Args"));
                 OpCode::TODO("Call")
-            }
+            },
+
+            TerminatorKind::Drop{value: ref lvalue, target, unwind} => {
+                let opcode = self.load_lvalue(lvalue);
+                self.opcodes.push(opcode);
+                OpCode::TODO("Drop")
+            },
             _ => OpCode::TODO("Terminator"),
         };
         self.opcodes.push(op);
@@ -103,9 +116,8 @@ impl<'a> BlockGen<'a> {
             &Lvalue::Var(n) => {
                 OpCode::STORE_VAR(n)
             },
-            &Lvalue::Temp(ref n) => {
-                OpCode::STORE_TMP(n.clone())
-            },
+            &Lvalue::Temp(ref n) => OpCode::STORE_TMP(*n),
+            &Lvalue::ReturnPointer => OpCode::RETURN_POINTER,
             _ => {
                 OpCode::TODO("Lvalue")
             }
@@ -113,29 +125,27 @@ impl<'a> BlockGen<'a> {
     }
 
     fn handle_rvalue(&mut self, rvalue: &Rvalue<'a>) {
-        match rvalue {
-            &Rvalue::Use(ref op) => {
+        match *rvalue {
+            Rvalue::Use(ref op) => {
                 self.rvalue_operand(op);
             },
-            &Rvalue::BinaryOp(op, ref left, ref right) => {
+            Rvalue::BinaryOp(op, ref left, ref right) => {
                 self.rvalue_operand(left);
                 self.rvalue_operand(right);
                 self.opcodes.push(OpCode::BINOP(op));
             },
-            &Rvalue::Aggregate(ref kind, ref vec) => {
-                match kind {
-                    &AggregateKind::Tuple => {
-                        self.opcodes.push(OpCode::TUPLE(vec.len()));
-                    },
-                    &AggregateKind::Vec => {
-                        self.opcodes.push(OpCode::VEC(vec.len()));
-                    },
-                    _ => {
-                        self.opcodes.push(OpCode::TODO("AggrKind"));
-                    },
-                }
+
+            Rvalue::Aggregate(AggregateKind::Tuple, ref vec) => {
+                self.opcodes.push(OpCode::TUPLE(vec.len()));
             },
-            &Rvalue::Ref(ref region, ref kind, ref lvalue) => {
+            Rvalue::Aggregate(AggregateKind::Vec, ref vec) => {
+                self.opcodes.push(OpCode::VEC(vec.len()));
+            },
+            Rvalue::Aggregate(_, ref _vec) => {
+                self.opcodes.push(OpCode::TODO("AggrKind"));
+            },
+
+            Rvalue::Ref(ref region, ref kind, ref lvalue) => {
                 let opcode = self.load_lvalue(lvalue);
                 self.opcodes.push(opcode);
                 self.opcodes.push(OpCode::BORROW(*kind));
@@ -178,16 +188,21 @@ impl<'a> BlockGen<'a> {
         }
     }
 
-    fn load_lvalue(&self, lvalue: &Lvalue<'a>) -> OpCode<'a> {
+    fn load_lvalue(&mut self, lvalue: &Lvalue<'a>) -> OpCode<'a> {
         match lvalue {
             &Lvalue::Var(n) => OpCode::LOAD_VAR(n),
             &Lvalue::Temp(n) => OpCode::LOAD_TMP(n),
             &Lvalue::Arg(n) => OpCode::LOAD_ARG(n),
             &Lvalue::Static(def_id) => OpCode::LOAD_STATIC(def_id),
             &Lvalue::Projection(ref proj) => {
-                println!("P: {:?}", proj.base);
-                println!("E: {:?}", proj.elem);
-                OpCode::TODO("Projection")
+                if let ProjectionElem::Deref = proj.elem {
+                    let lv = self.load_lvalue(&proj.base);
+                    self.opcodes.push(lv);
+                    OpCode::DEREF
+
+                } else {
+                    OpCode::TODO("Projection")
+                }
             },
             _ => OpCode::TODO("Load Lvalue")
         }
