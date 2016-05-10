@@ -60,6 +60,10 @@ pub enum OpCode<'tcx>{
 
     JUMP(usize),
     JUMP_IF(usize),
+
+    JUMP_REL(i32),
+    JUMP_REL_IF(i32),
+
 }
 
 struct FuncGen<'a, 'tcx: 'a> {
@@ -310,17 +314,49 @@ fn flatten_blocks<'tcx>(blocks: &Vec<Vec<OpCode<'tcx>>>) -> Vec<OpCode<'tcx>> {
     let mut opcodes = Vec::new();
 
     for block in blocks {
-        for opcode in block {
+        for opcode in block.iter() {
             let oc: OpCode = match *opcode {
                 OpCode::GOTO(ref target) => OpCode::JUMP(indicies[target.index()]),
                 OpCode::GOTO_IF(ref target) => OpCode::JUMP_IF(indicies[target.index()]),
+                // OpCode::GOTO(ref target) => OpCode::JUMP_REL(indicies[target.index()] as i32 - i),
+                // OpCode::GOTO_IF(ref target) => OpCode::JUMP_REL_IF(indicies[target.index()] as i32 - i ),
                 _ => opcode.clone(),
             };
             opcodes.push(oc);
         }
     }
 
-    opcodes
+    let mut opcodes_rel = Vec::new();
+
+    for (ii, opcode) in opcodes.iter_mut().enumerate() {
+        let i = ii as i32;
+        let oc: Option<OpCode> = match *opcode {
+            OpCode::JUMP(target) => {
+                let dist = target as i32 - i -1;
+                if dist == 0 {
+                    None
+                } else {
+                    Some(OpCode::JUMP_REL(dist))
+                }
+            },
+            OpCode::JUMP_IF(target) => {
+                let dist = target as i32 - i -1;
+                if dist == 0 {
+                    None
+                } else {
+                    Some(OpCode::JUMP_REL_IF(dist))
+                }
+            },
+            _ => Some(opcode.clone())
+        };
+
+        if let Some(op) = oc {
+            opcodes_rel.push(op);
+        }
+    }
+
+
+    opcodes_rel
 }
 
 
@@ -361,6 +397,15 @@ pub fn generate_bytecode<'tcx>(tcx: &TyCtxt<'tcx>, map: &MirMap<'tcx>) {
     // }
 
 
-    println!("{:?}", program);
-    println!("Main {:?}", main);
+    // println!("{:?}", program);
+    // println!("Main {:?}", main);
+    for (_, krate) in program {
+        for (func, block) in &krate {
+            println!("Func {:?}", func);
+            for (i, opcode) in block.iter().enumerate() {
+                println!("{} {:?}",i, opcode);
+            }
+            println!("");
+        }
+    }
 }

@@ -4,6 +4,7 @@
 extern crate moss;
 extern crate rustc;
 extern crate rustc_driver;
+extern crate getopts;
 
 use moss::mossc;
 
@@ -15,7 +16,11 @@ use rustc_driver::driver::CompileState;
 struct MossCompilerCalls;
 
 impl<'a> CompilerCalls<'a> for MossCompilerCalls {
-    fn build_controller(&mut self, _: &Session) -> driver::CompileController<'a> {
+    fn build_controller(
+        &mut self,
+        _: &Session,
+        _: &getopts::Matches
+    ) -> driver::CompileController<'a> {
         let mut control = driver::CompileController::basic();
 
         control.after_analysis.callback = Box::new(|state| {
