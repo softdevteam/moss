@@ -9,6 +9,8 @@ use moss::mossc;
 
 use rustc::session::Session;
 use rustc_driver::{driver, CompilerCalls, Compilation};
+use rustc_driver::driver::CompileState;
+
 
 struct MossCompilerCalls;
 
@@ -16,10 +18,10 @@ impl<'a> CompilerCalls<'a> for MossCompilerCalls {
     fn build_controller(&mut self, _: &Session) -> driver::CompileController<'a> {
         let mut control = driver::CompileController::basic();
 
-        control.after_analysis.callback = box |state| {
+        control.after_analysis.callback = Box::new(|state| {
             state.session.abort_if_errors();
             mossc::generate_bytecode(state.tcx.unwrap(), state.mir_map.unwrap());
-        };
+        });
 
         control.after_analysis.stop = Compilation::Stop;
 

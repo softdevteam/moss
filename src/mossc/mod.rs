@@ -1,32 +1,46 @@
 
+use std::collections::BTreeMap;
+
 use rustc::mir::repr::*;
 use rustc::mir::mir_map::MirMap;
+use rustc::middle::const_val::ConstVal;
+
+use rustc::hir::map::Node;
 use rustc::hir::def_id::DefId;
 
 use rustc::ty::TyCtxt;
 
-#[derive(Debug)]
-#[allow(non_camel_case_types)]
+
+#[derive(Debug, Clone)]
+pub enum Var {
+    Arg,
+    Var,
+    Tmp,
+}
+
+#[derive(Debug, Clone)]
 pub enum OpCode<'tcx>{
-    NONE,
+    // Assign to stack variable
+    Store(Var, u32),
+    Load(Var, u32),
 
-    STORE_VAR(u32),
-    CONSUME_VAR(u32),
-    LOAD_VAR(u32),
+    // Consume stack variable
+    // Use(Var, u32),
+    Use,
+    Consume,
 
-    STORE_TMP(u32),
-    CONSUME_TMP(u32),
-    LOAD_TMP(u32),
 
-    CONSUME_ARG(u32),
-    LOAD_ARG(u32),
+    Const(Constant<'tcx>),
+    Static(DefId),
+    LoadFunc(DefId),
 
-    LOAD_CONST(Constant<'tcx>),
-    LOAD_STATIC(DefId),
+    ArgCount(usize),
+    Call,
 
     BORROW(BorrowKind),
 
     DEREF,
+    DEREF_STORE,
 
     BINOP(BinOp),
 
@@ -41,34 +55,43 @@ pub enum OpCode<'tcx>{
     TUPLE(usize),
     VEC(usize),
 
-    TODO(&'static str)
+    TODO(&'static str),
+    TODO_S(String),
+
+    JUMP(usize),
+    JUMP_IF(usize),
 }
 
-struct FuncGen<'a> {
+struct FuncGen<'a, 'tcx: 'a> {
+    tcx: &'a TyCtxt<'tcx>,
+    map: &'a MirMap<'tcx>,
     blocks: Vec<Vec<OpCode<'a>>>
 }
 
-impl<'a> FuncGen<'a> {
-    fn new() -> FuncGen<'a> {
-        FuncGen{ blocks: Vec::new() }
+impl<'a, 'tcx: 'a> FuncGen<'a, 'tcx> {
+    fn new(tcx: &'a TyCtxt<'tcx>, map: &'a MirMap<'tcx>) -> Self {
+        FuncGen{ tcx: tcx, map: map, blocks: Vec::new() }
     }
 
     fn analyse(&mut self, func: &Mir<'a>) {
         for block in &func.basic_blocks {
-            let mut bg = BlockGen::new();
+            let mut bg = BlockGen::new(self.tcx, self.map);
             bg.analyse_block(block);
             self.blocks.push(bg.opcodes);
         }
     }
 }
 
-struct BlockGen<'a> {
+struct BlockGen<'a, 'tcx: 'a> {
+    tcx: &'a TyCtxt<'tcx>,
+    map: &'a MirMap<'tcx>,
+
     opcodes: Vec<OpCode<'a>>
 }
 
-impl<'a> BlockGen<'a> {
-    fn new() -> BlockGen<'a> {
-        BlockGen{ opcodes: Vec::new() }
+impl<'a, 'tcx: 'a> BlockGen<'a, 'tcx> {
+    fn new(tcx: &'a TyCtxt<'tcx>, map: &'a MirMap<'tcx>) -> Self {
+        BlockGen{ tcx: tcx, map: map, opcodes: Vec::new() }
     }
 
     fn analyse_block(&mut self, block: &BasicBlockData<'a>) {
@@ -81,7 +104,42 @@ impl<'a> BlockGen<'a> {
     fn analyse_statement(&mut self, statement: &Statement<'a>) {
         let StatementKind::Assign(ref lvalue, ref rvalue) = statement.kind;
         self.handle_rvalue(rvalue);
-        self.handle_lvalue(lvalue);
+        self.assign_to(lvalue);
+    }
+
+    fn assign_to(&mut self, lvalue: &Lvalue<'a>) {
+        let opcode = match *lvalue {
+            Lvalue::Var(n)  => OpCode::Store(Var::Var, n),
+            Lvalue::Temp(n) => OpCode::Store(Var::Tmp, n),
+            Lvalue::Arg(n)  => unreachable!(),
+            Lvalue::Static(..)  => OpCode::TODO("assign static"),
+
+            Lvalue::Projection(ref proj) => {
+                match proj.elem {
+                    ProjectionElem::Deref => {
+                        let opcode = self.load_lvalue(&proj.base);
+                        self.opcodes.push(opcode);
+                        OpCode::DEREF_STORE
+                        // OpCode::TODO_S(format!("deref projection {:?}:{:?}", proj.elem, proj.base))
+                    },
+
+                    _ => OpCode::TODO_S(format!("assign projection {:?}", proj.elem)),
+                }
+                // proj.base: Lvalue
+                // proj.elem: ProjectionElem<Operand>
+                // OpCode::TODO("assign projections")
+            },
+
+            Lvalue::ReturnPointer => OpCode::RETURN_POINTER,
+
+            // _ => OpCode::TODO("assign_to"),
+
+            //TODO: assign to projections
+        };
+        self.opcodes.push(opcode);
+    }
+
+    fn deref_lvalue(&mut self) {
     }
 
     fn analyse_terminator(&mut self, terminator: &Terminator<'a>) {
@@ -95,10 +153,21 @@ impl<'a> BlockGen<'a> {
             TerminatorKind::Return => OpCode::RETURN,
             TerminatorKind::Resume => OpCode::RESUME,
 
-            TerminatorKind::Call{ref func, ..} => {
+            TerminatorKind::Call{ref func, ref args, ref destination, ..} => {
+                // self.opcodes.push(OpCode::TODO("Load Args"));
+                for arg in args {
+                    self.rvalue_operand(arg);
+                }
+                self.opcodes.push(OpCode::ArgCount(args.len()));
+
                 self.rvalue_operand(func);
-                self.opcodes.push(OpCode::TODO("Load Args"));
-                OpCode::TODO("Call")
+                let destination = destination.as_ref().unwrap();
+                // println!("{:?}", destination.0);
+                self.opcodes.push(OpCode::Call);
+                self.assign_to(&destination.0);
+                OpCode::GOTO(destination.1)
+                // OpCode::Call()
+                // OpCode::TODO("CALL")
             },
 
             TerminatorKind::Drop{value: ref lvalue, target, unwind} => {
@@ -111,23 +180,12 @@ impl<'a> BlockGen<'a> {
         self.opcodes.push(op);
     }
 
-    fn handle_lvalue(&mut self, lvalue: &Lvalue) {
-        self.opcodes.push(match lvalue {
-            &Lvalue::Var(n) => {
-                OpCode::STORE_VAR(n)
-            },
-            &Lvalue::Temp(ref n) => OpCode::STORE_TMP(*n),
-            &Lvalue::ReturnPointer => OpCode::RETURN_POINTER,
-            _ => {
-                OpCode::TODO("Lvalue")
-            }
-        });
-    }
 
     fn handle_rvalue(&mut self, rvalue: &Rvalue<'a>) {
         match *rvalue {
             Rvalue::Use(ref op) => {
                 self.rvalue_operand(op);
+                self.opcodes.push(OpCode::Use)
             },
             Rvalue::BinaryOp(op, ref left, ref right) => {
                 self.rvalue_operand(left);
@@ -157,16 +215,31 @@ impl<'a> BlockGen<'a> {
     fn rvalue_operand(&mut self, op: &Operand<'a>) {
        let cmd = match op {
             &Operand::Consume(ref lvalue) => {
-                self.consume_lvalue(lvalue)
+                let o = self.load_lvalue(lvalue);
+                // self.opcodes.push(o);
+                o
+                // OpCode::Consume
             },
             &Operand::Constant(ref constant) => {
-                // if let Literal::Item{ ref def_id, .. } = constant.literal {
+                if let Literal::Item{ ref def_id, .. } = constant.literal {
+                // if let Literal::Value{ ref value } = constant.literal {
                     // println!("literal");
                     // if let &ConstVal::Function(def_id) = value {
-                        // println!("XXX: {:?} {}", def_id, def_id.index.as_u32());
+                        // OpCode::LoadFunc(def_id.index.as_u32())
+                    // let mir = self.tcx.map.get(def_id.index.as_u32());
+                    // if let Node::NodeLocal(pat) = mir {
+                    //     println!("{:?}", pat.id);
                     // }
-                // }
-                OpCode::LOAD_CONST(constant.clone())
+                    // println!("XXX: {:?} {:?}", constant.ty, constant.literal);
+                    // println!("{:?}", def_id);
+                    // self.map.map.get(def_id);
+                    OpCode::LoadFunc(def_id.clone())
+                    // } else {
+                        // OpCode::TODO("const literal item")
+                    // }
+                } else {
+                    OpCode::Const(constant.clone())
+                }
             }
         };
         self.opcodes.push(cmd);
@@ -179,21 +252,28 @@ impl<'a> BlockGen<'a> {
     ///
     /// This function is similar to handle_lvalue, but instead of storing data
     /// objects are loaded.
-    fn consume_lvalue(&self, lvalue: &Lvalue<'a>) -> OpCode<'a> {
-        match lvalue {
-            &Lvalue::Var(n) => OpCode::CONSUME_VAR(n),
-            &Lvalue::Temp(n) => OpCode::CONSUME_TMP(n),
-            &Lvalue::Arg(n) => OpCode::CONSUME_ARG(n),
-            _ => OpCode::TODO("Consume Lvalue")
-        }
-    }
+    // fn consume_lvalue(&mut self, lvalue: &Lvalue<'a>) -> OpCode<'a> {
+        // self.load_lvalue(lvalue)
+        // match *lvalue {
+        //     Lvalue::Var(n)  => OpCode::Use(Var::Var, n),
+        //     Lvalue::Temp(n) => OpCode::Use(Var::Tmp, n),
+        //     Lvalue::Arg(n)  => OpCode::Use(Var::Arg, n),
+        //     Lvalue::Projection(ref proj) => {
+        //         // self.unpack_projection(&**proj);
+        //         OpCode::TODO("lvalue projection")
+        //     },
+        //     _ => OpCode::TODO("Consume Lvalue")
+        // }
+    // }
+
+
 
     fn load_lvalue(&mut self, lvalue: &Lvalue<'a>) -> OpCode<'a> {
         match lvalue {
-            &Lvalue::Var(n) => OpCode::LOAD_VAR(n),
-            &Lvalue::Temp(n) => OpCode::LOAD_TMP(n),
-            &Lvalue::Arg(n) => OpCode::LOAD_ARG(n),
-            &Lvalue::Static(def_id) => OpCode::LOAD_STATIC(def_id),
+            &Lvalue::Var(n) => OpCode::Load(Var::Var, n),
+            &Lvalue::Temp(n) => OpCode::Load(Var::Tmp, n),
+            &Lvalue::Arg(n) => OpCode::Load(Var::Arg, n),
+            &Lvalue::Static(def_id) => OpCode::Static(def_id),
             &Lvalue::Projection(ref proj) => {
                 if let ProjectionElem::Deref = proj.elem {
                     let lv = self.load_lvalue(&proj.base);
@@ -219,15 +299,68 @@ impl<'a> BlockGen<'a> {
 
 
 
-pub fn generate_bytecode(_tcx: &TyCtxt, map: &MirMap) {
-    for key in map.map.keys() {
-        println!("CRUSTY: KEY {:?}", key);
-        if let Some(func_mir) = map.map.get(key) {
-            let mut collector = FuncGen::new();
-            collector.analyse(&func_mir);
-            for (i, block) in collector.blocks.iter().enumerate() {
-                println!("{} {:?}", i, block);
-            }
+fn flatten_blocks<'tcx>(blocks: &Vec<Vec<OpCode<'tcx>>>) -> Vec<OpCode<'tcx>> {
+    let mut indicies = Vec::new();
+    let mut n = 0_usize;
+    for block in blocks {
+        indicies.push(n);
+        n += block.len();
+    }
+
+    let mut opcodes = Vec::new();
+
+    for block in blocks {
+        for opcode in block {
+            let oc: OpCode = match *opcode {
+                OpCode::GOTO(ref target) => OpCode::JUMP(indicies[target.index()]),
+                OpCode::GOTO_IF(ref target) => OpCode::JUMP_IF(indicies[target.index()]),
+                _ => opcode.clone(),
+            };
+            opcodes.push(oc);
         }
     }
+
+    opcodes
+}
+
+
+pub fn generate_bytecode<'tcx>(tcx: &TyCtxt<'tcx>, map: &MirMap<'tcx>) {
+    //map krate num -> node id
+    let mut program : BTreeMap<u32, BTreeMap<u32, Vec<OpCode>>> = BTreeMap::new();
+    let mut main = 0;
+
+    for key in map.map.keys() {
+        // let mir = map.map.get(key).unwrap();
+        // println!("{:?}", mir.id);
+        let def_index = tcx.map.local_def_id(*key);
+
+        if let Node::NodeItem(item) = tcx.map.get(key.to_owned()) {
+            // println!("Function: {:?} {:?}", item.name.as_str(), def_index.index.as_u32());
+
+            // println!("FUNCTION: KEY {:?}", tcx.item_path_str(key));
+            if let Some(func_mir) = map.map.get(key) {
+
+                let mut collector = FuncGen::new(tcx, map);
+                collector.analyse(&func_mir);
+                for (i, block) in collector.blocks.iter().enumerate() {
+                    // println!("{} {:?}", i, block);
+                }
+                let blocks = flatten_blocks(&collector.blocks);
+                program.entry(def_index.krate).or_insert(BTreeMap::new()).insert(def_index.index.as_u32(), blocks);
+                if def_index.krate == 0 && item.name.as_str() == "main" {
+                    main = def_index.index.as_u32();
+                }
+            }
+        }
+        // println!("{:?}", keys);
+    }
+    // for id in map.map.keys() {
+
+    //     println!("Node {:?}", node);
+    //     println!("Node ID: {:?}", id);
+    // }
+
+
+    println!("{:?}", program);
+    println!("Main {:?}", main);
 }
