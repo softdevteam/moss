@@ -7,6 +7,7 @@ extern crate rustc_driver;
 extern crate getopts;
 
 use moss::mossc;
+use moss::mossc::interpret;
 
 use rustc::session::Session;
 use rustc_driver::{driver, CompilerCalls, Compilation};
@@ -25,7 +26,10 @@ impl<'a> CompilerCalls<'a> for MossCompilerCalls {
 
         control.after_analysis.callback = Box::new(|state| {
             state.session.abort_if_errors();
-            mossc::generate_bytecode(state.tcx.unwrap(), state.mir_map.unwrap());
+            let map = state.mir_map.unwrap();
+            let tcx = state.tcx.unwrap();
+            let (program, main) = mossc::generate_bytecode(tcx, map);
+            interpret::interpret(&program, main, tcx, map);
         });
 
         control.after_analysis.stop = Compilation::Stop;

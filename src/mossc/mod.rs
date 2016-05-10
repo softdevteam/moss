@@ -10,6 +10,7 @@ use rustc::hir::def_id::DefId;
 
 use rustc::ty::TyCtxt;
 
+pub mod interpret;
 
 #[derive(Debug, Clone)]
 pub enum Var {
@@ -24,6 +25,8 @@ pub enum OpCode<'tcx>{
     Store(Var, u32),
     Load(Var, u32),
 
+    LoadLocal(usize),
+    StoreLocal(usize),
     // Consume stack variable
     // Use(Var, u32),
     Use,
@@ -63,6 +66,8 @@ pub enum OpCode<'tcx>{
 
     JUMP_REL(i32),
     JUMP_REL_IF(i32),
+
+    StackFrame(usize),
 
 }
 
@@ -302,14 +307,19 @@ impl<'a, 'tcx: 'a> BlockGen<'a, 'tcx> {
 }
 
 
+pub type Program<'tcx> = BTreeMap<u32, BTreeMap<u32, Vec<OpCode<'tcx>>>>;
 
-fn flatten_blocks<'tcx>(blocks: &Vec<Vec<OpCode<'tcx>>>) -> Vec<OpCode<'tcx>> {
+
+fn optimize_blocks<'tcx>(blocks: &Vec<Vec<OpCode<'tcx>>>, mir: &Mir) -> Vec<OpCode<'tcx>> {
     let mut indicies = Vec::new();
     let mut n = 0_usize;
     for block in blocks {
         indicies.push(n);
         n += block.len();
     }
+
+    let var_offset = mir.arg_decls.len();
+    let tmp_offset = var_offset + mir.var_decls.len();
 
     let mut opcodes = Vec::new();
 
@@ -320,13 +330,19 @@ fn flatten_blocks<'tcx>(blocks: &Vec<Vec<OpCode<'tcx>>>) -> Vec<OpCode<'tcx>> {
                 OpCode::GOTO_IF(ref target) => OpCode::JUMP_IF(indicies[target.index()]),
                 // OpCode::GOTO(ref target) => OpCode::JUMP_REL(indicies[target.index()] as i32 - i),
                 // OpCode::GOTO_IF(ref target) => OpCode::JUMP_REL_IF(indicies[target.index()] as i32 - i ),
+                OpCode::Load(Var::Arg, n) => OpCode::LoadLocal(n as usize),
+                OpCode::Load(Var::Var, n) => OpCode::LoadLocal(var_offset + n as usize),
+                OpCode::Load(Var::Tmp, n) => OpCode::LoadLocal(tmp_offset + n as usize),
+                OpCode::Store(Var::Arg, n) => OpCode::StoreLocal(n as usize),
+                OpCode::Store(Var::Var, n) => OpCode::StoreLocal(var_offset + n as usize),
+                OpCode::Store(Var::Tmp, n) => OpCode::StoreLocal(tmp_offset + n as usize),
                 _ => opcode.clone(),
             };
             opcodes.push(oc);
         }
     }
 
-    let mut opcodes_rel = Vec::new();
+    let mut opcodes_rel = vec![OpCode::StackFrame(tmp_offset+mir.temp_decls.len())];
 
     for (ii, opcode) in opcodes.iter_mut().enumerate() {
         let i = ii as i32;
@@ -360,33 +376,31 @@ fn flatten_blocks<'tcx>(blocks: &Vec<Vec<OpCode<'tcx>>>) -> Vec<OpCode<'tcx>> {
 }
 
 
-pub fn generate_bytecode<'tcx>(tcx: &TyCtxt<'tcx>, map: &MirMap<'tcx>) {
-    //map krate num -> node id
-    let mut program : BTreeMap<u32, BTreeMap<u32, Vec<OpCode>>> = BTreeMap::new();
-    let mut main = 0;
 
-    for key in map.map.keys() {
+pub fn generate_bytecode<'a, 'tcx>(tcx: &'a TyCtxt<'tcx>, map: &'a MirMap<'tcx>) -> (Program<'a>, DefId) {
+
+    //map krate num -> node id
+    let mut program: Program = BTreeMap::new();
+    let mut main: Option<DefId> = None;
+
+    for (key, func_mir) in &map.map {
         // let mir = map.map.get(key).unwrap();
         // println!("{:?}", mir.id);
         let def_index = tcx.map.local_def_id(*key);
 
         if let Node::NodeItem(item) = tcx.map.get(key.to_owned()) {
             // println!("Function: {:?} {:?}", item.name.as_str(), def_index.index.as_u32());
-
-            // println!("FUNCTION: KEY {:?}", tcx.item_path_str(key));
-            if let Some(func_mir) = map.map.get(key) {
-
                 let mut collector = FuncGen::new(tcx, map);
                 collector.analyse(&func_mir);
-                for (i, block) in collector.blocks.iter().enumerate() {
-                    // println!("{} {:?}", i, block);
-                }
-                let blocks = flatten_blocks(&collector.blocks);
+                // for (i, block) in collector.blocks.iter().enumerate() {
+                //     // println!("{} {:?}", i, block);
+                // }
+                let blocks = optimize_blocks(&collector.blocks, func_mir);
                 program.entry(def_index.krate).or_insert(BTreeMap::new()).insert(def_index.index.as_u32(), blocks);
+
                 if def_index.krate == 0 && item.name.as_str() == "main" {
-                    main = def_index.index.as_u32();
+                    main = Some(def_index);
                 }
-            }
         }
         // println!("{:?}", keys);
     }
@@ -396,11 +410,8 @@ pub fn generate_bytecode<'tcx>(tcx: &TyCtxt<'tcx>, map: &MirMap<'tcx>) {
     //     println!("Node ID: {:?}", id);
     // }
 
-
-    // println!("{:?}", program);
-    // println!("Main {:?}", main);
-    for (_, krate) in program {
-        for (func, block) in &krate {
+    for (_, krate) in program.iter() {
+        for (func, block) in krate {
             println!("Func {:?}", func);
             for (i, opcode) in block.iter().enumerate() {
                 println!("{} {:?}",i, opcode);
@@ -408,4 +419,6 @@ pub fn generate_bytecode<'tcx>(tcx: &TyCtxt<'tcx>, map: &MirMap<'tcx>) {
             println!("");
         }
     }
+
+    (program, main.unwrap())
 }
