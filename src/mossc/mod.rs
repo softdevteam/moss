@@ -307,7 +307,8 @@ impl<'a, 'tcx: 'a> BlockGen<'a, 'tcx> {
 }
 
 
-pub type Program<'tcx> = BTreeMap<u32, BTreeMap<u32, Vec<OpCode<'tcx>>>>;
+pub type Function<'tcx> = Vec<OpCode<'tcx>>;
+pub type Program<'tcx> = BTreeMap<u32, BTreeMap<u32, Function<'tcx>>>;
 
 
 fn optimize_blocks<'tcx>(blocks: &Vec<Vec<OpCode<'tcx>>>, mir: &Mir) -> Vec<OpCode<'tcx>> {
@@ -328,8 +329,7 @@ fn optimize_blocks<'tcx>(blocks: &Vec<Vec<OpCode<'tcx>>>, mir: &Mir) -> Vec<OpCo
             let oc: OpCode = match *opcode {
                 OpCode::GOTO(ref target) => OpCode::JUMP(indicies[target.index()]),
                 OpCode::GOTO_IF(ref target) => OpCode::JUMP_IF(indicies[target.index()]),
-                // OpCode::GOTO(ref target) => OpCode::JUMP_REL(indicies[target.index()] as i32 - i),
-                // OpCode::GOTO_IF(ref target) => OpCode::JUMP_REL_IF(indicies[target.index()] as i32 - i ),
+
                 OpCode::Load(Var::Arg, n) => OpCode::LoadLocal(n as usize),
                 OpCode::Load(Var::Var, n) => OpCode::LoadLocal(var_offset + n as usize),
                 OpCode::Load(Var::Tmp, n) => OpCode::LoadLocal(tmp_offset + n as usize),
@@ -348,20 +348,20 @@ fn optimize_blocks<'tcx>(blocks: &Vec<Vec<OpCode<'tcx>>>, mir: &Mir) -> Vec<OpCo
         let i = ii as i32;
         let oc: Option<OpCode> = match *opcode {
             OpCode::JUMP(target) => {
-                let dist = target as i32 - i -1;
-                if dist == 0 {
-                    None
-                } else {
+                let dist = target as i32 - i;
+                // if dist == 1 {
+                    // None
+                // } else {
                     Some(OpCode::JUMP_REL(dist))
-                }
+                // }
             },
             OpCode::JUMP_IF(target) => {
-                let dist = target as i32 - i -1;
-                if dist == 0 {
-                    None
-                } else {
+                let dist = target as i32 - i;
+                // if dist == 1 {
+                    // None
+                // } else {
                     Some(OpCode::JUMP_REL_IF(dist))
-                }
+                // }
             },
             _ => Some(opcode.clone())
         };
@@ -396,10 +396,16 @@ pub fn generate_bytecode<'a, 'tcx>(tcx: &'a TyCtxt<'tcx>, map: &'a MirMap<'tcx>)
                 //     // println!("{} {:?}", i, block);
                 // }
                 let blocks = optimize_blocks(&collector.blocks, func_mir);
-                program.entry(def_index.krate).or_insert(BTreeMap::new()).insert(def_index.index.as_u32(), blocks);
 
-                if def_index.krate == 0 && item.name.as_str() == "main" {
-                    main = Some(def_index);
+                if item.name.as_str().starts_with("__") {
+                    // println!("INTERNAL FUNC {:?}", item.name);
+                    //TODO
+                } else {
+                    program.entry(def_index.krate).or_insert(BTreeMap::new()).insert(def_index.index.as_u32(), blocks);
+
+                    if def_index.krate == 0 && item.name.as_str() == "main" {
+                        main = Some(def_index);
+                    }
                 }
         }
         // println!("{:?}", keys);
