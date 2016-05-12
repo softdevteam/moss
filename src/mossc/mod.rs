@@ -10,6 +10,10 @@ use rustc::hir::def_id::DefId;
 
 use rustc::ty::TyCtxt;
 
+use rustc_const_math::ConstInt;
+
+
+
 pub mod interpret;
 
 #[derive(Debug, Clone)]
@@ -40,6 +44,11 @@ pub enum OpCode<'tcx>{
     ArgCount(usize),
     Call,
 
+    UnsignedInteger(u64),
+    SignedInteger(i64),
+    Float(f64),
+    Bool(bool),
+
     BORROW(BorrowKind),
 
     DEREF,
@@ -50,8 +59,9 @@ pub enum OpCode<'tcx>{
     RETURN_POINTER,
 
     //Terminator
-    GOTO(BasicBlock),
-    GOTO_IF(BasicBlock),
+    _Goto(BasicBlock),
+    _GotoIf(BasicBlock),
+
     RETURN,
     RESUME,
 
@@ -120,7 +130,7 @@ impl<'a, 'tcx: 'a> BlockGen<'a, 'tcx> {
         let opcode = match *lvalue {
             Lvalue::Var(n)  => OpCode::Store(Var::Var, n),
             Lvalue::Temp(n) => OpCode::Store(Var::Tmp, n),
-            Lvalue::Arg(n)  => unreachable!(),
+            Lvalue::Arg(_n)  => unreachable!(),
             Lvalue::Static(..)  => OpCode::TODO("assign static"),
 
             Lvalue::Projection(ref proj) => {
@@ -153,11 +163,11 @@ impl<'a, 'tcx: 'a> BlockGen<'a, 'tcx> {
 
     fn analyse_terminator(&mut self, terminator: &Terminator<'a>) {
         let op = match terminator.kind {
-            TerminatorKind::Goto{target} => OpCode::GOTO(target),
+            TerminatorKind::Goto{target} => OpCode::_Goto(target),
             TerminatorKind::If{ref cond, targets: (ref bb1, ref bb2)} => {
                 self.rvalue_operand(cond);
-                self.opcodes.push(OpCode::GOTO_IF(*bb1));
-                OpCode::GOTO(*bb2)
+                self.opcodes.push(OpCode::_GotoIf(*bb1));
+                OpCode::_Goto(*bb2)
             },
             TerminatorKind::Return => OpCode::RETURN,
             TerminatorKind::Resume => OpCode::RESUME,
@@ -174,7 +184,7 @@ impl<'a, 'tcx: 'a> BlockGen<'a, 'tcx> {
                 // println!("{:?}", destination.0);
                 self.opcodes.push(OpCode::Call);
                 self.assign_to(&destination.0);
-                OpCode::GOTO(destination.1)
+                OpCode::_Goto(destination.1)
                 // OpCode::Call()
                 // OpCode::TODO("CALL")
             },
@@ -247,7 +257,8 @@ impl<'a, 'tcx: 'a> BlockGen<'a, 'tcx> {
                         // OpCode::TODO("const literal item")
                     // }
                 } else {
-                    OpCode::Const(constant.clone())
+                    // OpCode::Const(constant.clone())
+                    self.unpack_const(&constant.literal)
                 }
             }
         };
@@ -297,6 +308,35 @@ impl<'a, 'tcx: 'a> BlockGen<'a, 'tcx> {
         }
     }
 
+    fn unpack_const(&self, literal: &Literal) -> OpCode<'tcx> {
+        match *literal {
+            Literal::Value{ ref value } => {
+                use rustc_const_math::ConstInt::*;
+                if let ConstVal::Integral(ref boxed) = *value {
+                    match *boxed {
+
+                         U8(u) => OpCode::UnsignedInteger(u as u64),
+                        U16(u) => OpCode::UnsignedInteger(u as u64),
+                        U32(u) => OpCode::UnsignedInteger(u as u64),
+                        U64(u) => OpCode::UnsignedInteger(u),
+
+                         I8(i) => OpCode::SignedInteger(i as i64),
+                        I16(i) => OpCode::SignedInteger(i as i64),
+                        I32(i) => OpCode::SignedInteger(i as i64),
+                        I64(i) => OpCode::SignedInteger(i),
+
+                        _ => unimplemented!(),
+                    }
+                } else if let ConstVal::Bool(b) = *value {
+                    OpCode::Bool(b)
+                } else {
+                    unimplemented!();
+                }
+            }
+            _ => unimplemented!()
+        }
+    }
+
     // TODO: further unpack const values
     // const(42i32) -> [I32, 42]
     // fn constant_value(&mut self, val: Constant) {
@@ -327,8 +367,8 @@ fn optimize_blocks<'tcx>(blocks: &Vec<Vec<OpCode<'tcx>>>, mir: &Mir) -> Vec<OpCo
     for block in blocks {
         for opcode in block.iter() {
             let oc: OpCode = match *opcode {
-                OpCode::GOTO(ref target) => OpCode::JUMP(indicies[target.index()]),
-                OpCode::GOTO_IF(ref target) => OpCode::JUMP_IF(indicies[target.index()]),
+                OpCode::_Goto(ref target) => OpCode::JUMP(indicies[target.index()]),
+                OpCode::_GotoIf(ref target) => OpCode::JUMP_IF(indicies[target.index()]),
 
                 OpCode::Load(Var::Arg, n) => OpCode::LoadLocal(n as usize),
                 OpCode::Load(Var::Var, n) => OpCode::LoadLocal(var_offset + n as usize),

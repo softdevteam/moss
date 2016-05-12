@@ -13,9 +13,13 @@ use rustc::middle::const_val::ConstVal;
 use rustc_const_math::ConstInt;
 
 #[derive(Clone, Debug)]
+
 enum StackData<'a, 'tcx:'a> {
     None,
     Const(&'a Constant<'tcx>),
+    I64(i64),
+    U64(u64),
+    Bool(bool),
 }
 
 
@@ -47,7 +51,12 @@ impl<'cx> Interpreter<'cx> {
             match *opcode {
                 OpCode::RETURN => break,
                 OpCode::JUMP_REL(n) => { pc = (pc as i32 + n) as usize; continue },
-                OpCode::Const(ref const_val) => self.o_const( &mut stack, const_val ),
+                // OpCode::Const(ref const_val) => self.o_const( &mut stack, const_val ),
+
+                OpCode::SignedInteger(n) => { stack.push(StackData::I64(n)) },
+                OpCode::UnsignedInteger(n) => { stack.push(StackData::U64(n)) },
+                OpCode::Bool(b) => { stack.push(StackData::Bool(b)) },
+
                 OpCode::StoreLocal(idx) => self.o_store( &mut stack, &mut locals, idx),
                 OpCode::LoadLocal(idx) => self.o_load( &mut stack, &mut locals, idx),
                 OpCode::BINOP(op) => self.o_binop( &mut stack, &mut locals, op),
@@ -79,7 +88,14 @@ impl<'cx> Interpreter<'cx> {
 
         self.unpack(&left);
         match op {
-            // BinOp::Add => add(left, right),
+            BinOp::Add => {
+                match (left, right) {
+                    (StackData::I64(left), StackData::I64(right)) => {
+                        stack.push(StackData::I64(left + right ));
+                    }
+                    _ => unimplemented!(),
+                }
+            }
             _ => panic!("unsoported binop {:?}", op)
         }
     }
