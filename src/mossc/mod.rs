@@ -1,4 +1,12 @@
 
+// TODO: STACK
+// There are two different stacks, the interpreter level stack (push and pop)
+// and the user space stack (stack vs heap).
+
+// How are aggregates saved on the stac? e.g. `let x = (1, 2);`
+
+// TODO: Hack an output function.
+
 use std::collections::BTreeMap;
 
 use rustc::mir::repr::*;
@@ -11,8 +19,7 @@ use rustc::hir::def_id::DefId;
 use rustc::ty::TyCtxt;
 
 use rustc_const_math::ConstInt;
-
-
+use syntax::parse::token::InternedString;
 
 pub mod interpret;
 
@@ -68,6 +75,8 @@ pub enum OpCode<'tcx>{
     TUPLE(usize),
     VEC(usize),
 
+    TUPLE_ASSIGN(usize),
+
     TODO(&'static str),
     TODO_S(String),
 
@@ -76,6 +85,8 @@ pub enum OpCode<'tcx>{
 
     JUMP_REL(i32),
     JUMP_REL_IF(i32),
+
+    Pop,
 
     StackFrame(usize),
 
@@ -214,6 +225,10 @@ impl<'a, 'tcx: 'a> BlockGen<'a, 'tcx> {
 
             Rvalue::Aggregate(AggregateKind::Tuple, ref vec) => {
                 self.opcodes.push(OpCode::TUPLE(vec.len()));
+                for (i, value) in vec.iter().enumerate() {
+                    self.rvalue_operand(value);
+                    self.opcodes.push(OpCode::TUPLE_ASSIGN(i));
+                }
             },
             Rvalue::Aggregate(AggregateKind::Vec, ref vec) => {
                 self.opcodes.push(OpCode::VEC(vec.len()));
@@ -421,6 +436,7 @@ pub fn generate_bytecode<'a, 'tcx>(tcx: &'a TyCtxt<'tcx>, map: &'a MirMap<'tcx>)
 
     //map krate num -> node id
     let mut program: Program = BTreeMap::new();
+    // let mut build_ins: BTreeMap<u32, BTreeMap<u32, &'a InternedString>> = BTreeMap::new();
     let mut main: Option<DefId> = None;
 
     for (key, func_mir) in &map.map {
@@ -438,8 +454,10 @@ pub fn generate_bytecode<'a, 'tcx>(tcx: &'a TyCtxt<'tcx>, map: &'a MirMap<'tcx>)
                 let blocks = optimize_blocks(&collector.blocks, func_mir);
 
                 if item.name.as_str().starts_with("__") {
-                    // println!("INTERNAL FUNC {:?}", item.name);
-                    //TODO
+                    // TODO
+                    // figure out how to use internedstring here.
+                    // has something to do with lifetimes (what else)
+                    // build_ins.entry(def_index.krate).or_insert(BTreeMap::new()).insert(def_index.index.as_u32(), &item.name.as_str());
                 } else {
                     program.entry(def_index.krate).or_insert(BTreeMap::new()).insert(def_index.index.as_u32(), blocks);
 
