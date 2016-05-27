@@ -9,7 +9,16 @@
 
 use std::collections::BTreeMap;
 
-use rustc::mir::repr::*;
+pub use rustc::mir::repr::BorrowKind;
+
+pub use rustc::mir::repr::{
+    BasicBlock, BasicBlockData, Mir,
+    BinOp, Constant, Literal, Operand,
+    Lvalue, Rvalue,
+    Statement, StatementKind, Terminator, TerminatorKind,
+    ProjectionElem, AggregateKind
+};
+
 use rustc::mir::mir_map::MirMap;
 use rustc::middle::const_val::ConstVal;
 
@@ -18,7 +27,7 @@ use rustc::hir::def_id::DefId;
 
 use rustc::ty::TyCtxt;
 
-use rustc_const_math::ConstInt;
+// use rustc_const_math::ConstInt;
 use syntax::parse::token::InternedString;
 
 pub mod interpret;
@@ -30,6 +39,7 @@ pub enum Var {
     Tmp,
 }
 
+#[allow(non_camel_case_types)]
 #[derive(Debug, Clone)]
 pub enum OpCode<'tcx>{
     // Assign to stack variable
@@ -76,6 +86,7 @@ pub enum OpCode<'tcx>{
     VEC(usize),
 
     TUPLE_ASSIGN(usize),
+    TUPLE_GET(usize),
 
     TODO(&'static str),
     TODO_S(String),
@@ -311,13 +322,20 @@ impl<'a, 'tcx: 'a> BlockGen<'a, 'tcx> {
             &Lvalue::Arg(n) => OpCode::Load(Var::Arg, n),
             &Lvalue::Static(def_id) => OpCode::Static(def_id),
             &Lvalue::Projection(ref proj) => {
-                if let ProjectionElem::Deref = proj.elem {
-                    let lv = self.load_lvalue(&proj.base);
-                    self.opcodes.push(lv);
-                    OpCode::DEREF
+                match proj.elem {
+                    ProjectionElem::Deref => {
+                        let lv = self.load_lvalue(&proj.base);
+                        self.opcodes.push(lv);
+                        OpCode::DEREF
+                    },
+                    ProjectionElem::Field(field, _ty) => {
+                        //XXX: is type arg needed here?
+                        let opcode = self.load_lvalue(&proj.base);
+                        self.opcodes.push(opcode);
 
-                } else {
-                    OpCode::TODO("Projection")
+                        OpCode::TUPLE_GET(field.index())
+                    },
+                    _ => OpCode::TODO("Projection")
                 }
             },
             _ => OpCode::TODO("Load Lvalue")
@@ -348,8 +366,15 @@ impl<'a, 'tcx: 'a> BlockGen<'a, 'tcx> {
                 } else {
                     unimplemented!();
                 }
-            }
-            _ => unimplemented!()
+            },
+            Literal::Item{def_id, ..} => {
+                //let x = &42; will generate a reference to a static variable
+                // println!("{:?}", def_id);
+                unimplemented!()
+            },
+            Literal::Promoted{index} => {
+                unimplemented!()
+            },
         }
     }
 
