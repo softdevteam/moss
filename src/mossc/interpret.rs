@@ -58,6 +58,7 @@ enum StackData {
     Tuple(WrappedTuple),
 
     Address(Address),
+    Borrow(Address),
     // Value(StackCell<'a, 'tcx>),
     ArgCount(usize),
 }
@@ -87,6 +88,7 @@ enum WrappedValue {
     I64(i64),
     U64(u64),
     Bool(bool),
+    Address(Address),
     // Tuple(WrappedTuple<'a, 'tcx>),
     // NamedTuple(W_NamedTuple<'a, 'tcx>),
     // Function(&'a Function<'tcx>),
@@ -157,6 +159,9 @@ impl<'cx> Interpreter<'cx> {
             &StackData::Address(Address::StackLocal(ref other)) => {
                 self.w_stack[*other].clone()
             },
+            &StackData::Address(Address::StaticFunc(ref def_id)) => {
+                WrappedValue::Address(Address::StaticFunc(def_id.clone()))
+            },
             _ => panic!("should not load interpreter level object {:?}", data)
         }
     }
@@ -212,19 +217,26 @@ impl<'cx> Interpreter<'cx> {
                 OpCode::Call => {
                     self.w_stack_pointer += func_stacksize;
 
-                    let address = self.stack.pop().unwrap().unwrap_address();
-
-                    if let Address::StaticFunc(defid) = address {
-                        let krate = self.program.get(&defid.krate).unwrap();
-                        let func = krate.get(&defid.index.as_u32()).unwrap();
-                        self.eval_func(func);
+                    // let address = self.stack.pop().unwrap().unwrap_address();
+                    let wrapped_address = self.pop_stack_value();
+                    if let WrappedValue::Address(address) = wrapped_address {
+                        if let Address::StaticFunc(defid) = address {
+                            let krate = self.program.get(&defid.krate).unwrap();
+                            let func = krate.get(&defid.index.as_u32()).unwrap();
+                            self.eval_func(func);
+                        } else {
+                            panic!("Expected func got {:?}", address);
+                        }
+                        self.w_stack_pointer -= func_stacksize;
                     } else {
-                        panic!("Expected func got {:?}", address);
+                        panic!("excpected address got {:?}", wrapped_address);
                     }
-                    self.w_stack_pointer -= func_stacksize;
                 },
 
-                OpCode::JUMP_REL(n) => { pc = (pc as i32 + n) as usize; continue },
+                OpCode::JUMP_REL(n) => {
+                    pc = (pc as i32 + n) as usize;
+                    continue
+                },
 
                 OpCode::JUMP_REL_IF(n) => {
                     if let StackData::Flag(b) = self.stack.pop().unwrap() {
@@ -258,10 +270,46 @@ impl<'cx> Interpreter<'cx> {
                 OpCode::BINOP(op) => self.o_binop(op),
 
                 OpCode::BORROW(kind) => {
-                    // self.stack.push()
+                    let address = self.stack.pop().unwrap().unwrap_address();
+                    self.stack.push(StackData::Value(
+                        WrappedValue::Address(address)))
                 },
 
-                _ => println!("TODO {:?}", opcode)
+                OpCode::DEREF => {
+                    let wrapped_target = self.pop_stack_value();
+                    if let WrappedValue::Address(target) = wrapped_target {
+                        match target {
+                            Address::StackLocal(idx) => {
+                                let val = self.w_stack[idx].clone();
+                                self.stack.push(StackData::Value(val));
+                            }
+                            _ => unimplemented!()
+                        }
+                    }  else {
+                        panic!("can't resolve {:?}", wrapped_target);
+                    }
+                },
+
+                OpCode::DEREF_STORE => {
+                    let wrapped_target = self.pop_stack_value();
+                    let value = self.pop_stack_value();
+
+                    if let WrappedValue::Address(target) = wrapped_target {
+                        match target {
+                            Address::StackLocal(idx) => {
+                                self.w_stack[idx] = value;
+                            }
+                            _ => unimplemented!()
+                        }
+                    } else {
+                        panic!("can't resolve {:?}", wrapped_target);
+                    }
+                },
+
+                _ => {
+                    println!("TODO {:?}", opcode);
+                    // unimplemented!();
+                },
             }
             pc += 1;
         }
@@ -297,10 +345,13 @@ impl<'cx> Interpreter<'cx> {
     fn o_store_local(&mut self, idx: usize) {
         let v = self.stack.pop().unwrap();
         //XXXX
-        let val = match v{
+        let val = match v {
             StackData::Value(v) => v,
             StackData::Address(Address::StackLocal(other)) => {
                 self.w_stack[other].clone()
+            },
+            StackData::Address(Address::StaticFunc(defid)) => {
+                WrappedValue::Address(Address::StaticFunc(defid))
             },
             _ => panic!("should not store interpreter level object {:?}", v)
         };
@@ -330,7 +381,10 @@ impl<'cx> Interpreter<'cx> {
                         self.stack.push(
                             StackData::Value(WrappedValue::U64(left + right )));
                     },
-                    _ => unimplemented!(),
+                    (left, right) => {
+                        println!("unsoported {:?} {:?}", left, right);
+                        unimplemented!()
+                    },
                 }
             },
             BinOp::Lt => {
