@@ -25,7 +25,9 @@ enum StackData<'a, 'tcx:'a> {
     U64(u64),
     Bool(bool),
     Tuple(W_Tuple<'a, 'tcx>),
-    NamedTuple(W_NamedTuple<'a, 'tcx>)
+    NamedTuple(W_NamedTuple<'a, 'tcx>),
+    Function(&'a Function<'tcx>),
+    ArgCount(usize),
 }
 
 
@@ -67,9 +69,15 @@ impl<'cx> Interpreter<'cx> {
         Interpreter { program: program, stack: Stack::new(), w_stack: Stack::new(), w_stack_pointer: 0 }
     }
 
+    // fn load_func(&'cx mut self, defid: DefId) -> &'b Function {
+        // let krate = self.program.get(&defid.krate).unwrap();
+        // krate.get(&defid.index.as_u32()).unwrap()
+    // }
+
     fn run(&mut self, main: DefId) {
         let krate = self.program.get(&main.krate).unwrap();
         let main_func = krate.get(&main.index.as_u32()).unwrap();
+        // let main_func = self.load_func(main);
         self.eval_func(main_func);
     }
 
@@ -83,17 +91,47 @@ impl<'cx> Interpreter<'cx> {
         for _ in self.w_stack.len() .. self.w_stack_pointer + func_stacksize {
             self.w_stack.push(StackData::None);
         }
-        self.w_stack_pointer += func_stacksize;
 
+        if let Some(&StackData::ArgCount(n)) = self.stack.last() {
+            self.stack.pop();
+            for i in 0..n {
+                self.w_stack[self.w_stack_pointer + i] = self.stack.pop().unwrap();
+            }
+        }
         let mut pc: usize = 1;
         loop {
+
             let opcode = &func[pc];
             println!("Execute {:?}", opcode);
             match *opcode {
                 OpCode::RETURN => {
-                    self.w_stack_pointer -= func_stacksize;
                     break
                 },
+
+                OpCode::RETURN_POINTER => {},
+
+                OpCode::LoadFunc(defid) => {
+                    let krate = self.program.get(&defid.krate).unwrap();
+                    let func = krate.get(&defid.index.as_u32()).unwrap();
+                    self.stack.push(StackData::Function(func));
+                },
+
+                OpCode::ArgCount(size) => {
+                    self.stack.push(StackData::ArgCount(size));
+                },
+
+                OpCode::Call => {
+                    self.w_stack_pointer += func_stacksize;
+
+                    let s_func = self.stack.pop().unwrap();
+                    if let StackData::Function(func) = s_func {
+                        self.eval_func(func);
+                    } else {
+                        panic!("Expected func got {:?}", s_func);
+                    }
+                    self.w_stack_pointer -= func_stacksize;
+                },
+
                 OpCode::JUMP_REL(n) => { pc = (pc as i32 + n) as usize; continue },
 
                 OpCode::JUMP_REL_IF(n) => {
@@ -105,7 +143,7 @@ impl<'cx> Interpreter<'cx> {
                     } else {
                         panic!("expected bool");
                     }
-                }
+                },
                 // OpCode::Const(ref const_val) => self.o_const( &mut stack, const_val ),
 
                 OpCode::TUPLE(n) => self.o_tuple(n),
@@ -124,7 +162,7 @@ impl<'cx> Interpreter<'cx> {
             }
             pc += 1;
         }
-        println!("Locals: {:?}", self.w_stack);
+        println!("\nLocals: {:?}", self.w_stack);
     }
 
     fn o_tuple(&mut self, size: usize) {
@@ -133,15 +171,13 @@ impl<'cx> Interpreter<'cx> {
 
     fn o_tuple_assign(&mut self, idx: usize) {
         let value = self.stack.pop().unwrap();
-        let mut s_tuple = self.stack.pop().unwrap();
+        let mut s_tuple = self.stack.last_mut().unwrap();
 
-        if let StackData::Tuple(ref mut w_tuple) = s_tuple  {
+        if let StackData::Tuple(ref mut w_tuple) = *s_tuple  {
             w_tuple.data[idx] = value;
         } else {
             panic!("Expected tuple found {:?}", s_tuple);
         }
-
-        self.stack.push(s_tuple);
     }
 
     fn o_const(&mut self, const_val: &'cx Constant<'cx>) {
@@ -150,11 +186,11 @@ impl<'cx> Interpreter<'cx> {
 
     fn o_store(&mut self, idx: usize) {
         let val = self.stack.pop().unwrap();
-        self.w_stack[idx] = val;
+        self.w_stack[self.w_stack_pointer + idx] = val;
     }
 
     fn o_load(&mut self, idx: usize) {
-        let val = &self.w_stack[idx];
+        let val = &self.w_stack[self.w_stack_pointer + idx];
         // clone the pointer to the old value
         self.stack.push(val.clone());
     }
@@ -169,6 +205,9 @@ impl<'cx> Interpreter<'cx> {
                 match (left, right) {
                     (StackData::I64(left), StackData::I64(right)) => {
                         self.stack.push(StackData::I64(left + right ));
+                    },
+                    (StackData::U64(left), StackData::U64(right)) => {
+                        self.stack.push(StackData::U64(left + right ));
                     },
                     _ => unimplemented!(),
                 }

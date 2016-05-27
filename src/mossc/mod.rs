@@ -160,6 +160,7 @@ impl<'a, 'tcx: 'a> BlockGen<'a, 'tcx> {
                 // OpCode::TODO("assign projections")
             },
 
+            // ignore, value is just left on the stack
             Lvalue::ReturnPointer => OpCode::RETURN_POINTER,
 
             // _ => OpCode::TODO("assign_to"),
