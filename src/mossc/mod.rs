@@ -372,7 +372,7 @@ impl<'a, 'tcx: 'a> BlockGen<'a, 'tcx> {
                 // println!("{:?}", def_id);
                 unimplemented!()
             },
-            Literal::Promoted{index} => {
+            Literal::Promoted{index: _} => {
                 unimplemented!()
             },
         }

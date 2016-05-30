@@ -1,5 +1,4 @@
 
-use std;
 use std::collections::BTreeMap;
 use std::ops::{Deref, DerefMut};
 
@@ -9,17 +8,14 @@ use rustc::mir::mir_map::MirMap;
 use rustc::ty::TyCtxt;
 use rustc::hir::def_id::DefId;
 
-use rustc::mir::repr::{Constant, BinOp, Literal};
-use rustc::middle::const_val::ConstVal;
-
-use rustc_const_math::ConstInt;
+use rustc::mir::repr::{BinOp, Literal};
 
 
 //XXX: Is it better to store Tuple/NamedTuple struct on the stack or
 // should we rather use references to them to keep the theme of 64 bit values.
 
 #[derive(Clone, Debug)]
-enum Address {
+pub enum Address {
     StackLocal(usize),
 
     // address in tuple, address in vector
@@ -30,7 +26,7 @@ enum Address {
 
 
 #[derive(Clone, Debug)]
-struct StackCell {
+pub struct StackCell {
     address: Address,
     value: WrappedValue,
 }
@@ -50,15 +46,15 @@ struct StackCell {
 // }
 
 #[derive(Clone, Debug)]
-enum StackData {
+pub enum StackData {
     None,
 
+    // Flag is used for JUMP_IF, WrappedValue::Bool eventually maps to Flag
     Flag(bool),
     Value(WrappedValue),
     Tuple(WrappedTuple),
 
     Address(Address),
-    Borrow(Address),
     // Value(StackCell<'a, 'tcx>),
     ArgCount(usize),
 }
@@ -82,7 +78,7 @@ impl StackData {
 }
 
 #[derive(Clone, Debug)]
-enum WrappedValue {
+pub enum WrappedValue {
     None,
     StackReference(usize),
     I64(i64),
@@ -97,7 +93,7 @@ enum WrappedValue {
 
 // TODO: implement getter and setter for tuple
 #[derive(Clone, Debug)]
-struct WrappedTuple {
+pub struct WrappedTuple {
     data: Vec<WrappedValue>,
 }
 
@@ -146,12 +142,12 @@ impl<'cx> Interpreter<'cx> {
         self.eval_func(main_func);
     }
 
-    fn deref(&mut self, address: Address) -> WrappedValue {
-        match address {
-            Address::StackLocal(idx) => self.w_stack[idx].clone(),
-            _ => unimplemented!()
-        }
-    }
+    // fn deref(&mut self, address: Address) -> WrappedValue {
+        // match address {
+            // Address::StackLocal(idx) => self.w_stack[idx].clone(),
+            // _ => unimplemented!()
+        // }
+    // }
 
     fn to_value(&self, data: &StackData) -> WrappedValue {
         match data {
@@ -248,7 +244,6 @@ impl<'cx> Interpreter<'cx> {
                         panic!("expected bool");
                     }
                 },
-                // OpCode::Const(ref const_val) => self.o_const( &mut stack, const_val ),
 
                 OpCode::TUPLE(n) => self.o_tuple(n),
                 OpCode::TUPLE_ASSIGN(idx) => self.o_tuple_assign(idx),
@@ -269,7 +264,7 @@ impl<'cx> Interpreter<'cx> {
                 OpCode::LoadLocal(idx) => self.o_load_local(idx),
                 OpCode::BINOP(op) => self.o_binop(op),
 
-                OpCode::BORROW(kind) => {
+                OpCode::BORROW(..) => {
                     let address = self.stack.pop().unwrap().unwrap_address();
                     self.stack.push(StackData::Value(
                         WrappedValue::Address(address)))
@@ -367,37 +362,66 @@ impl<'cx> Interpreter<'cx> {
     }
 
     fn o_binop(&mut self, op: BinOp) {
+        use self::WrappedValue::*;
+        use rustc::mir::repr::BinOp::*;
+
         let right = self.pop_stack_value();
         let left = self.pop_stack_value();
 
-        match op {
-            BinOp::Add => {
-                match (left, right) {
-                    (WrappedValue::I64(left), WrappedValue::I64(right)) => {
-                        self.stack.push(
-                            StackData::Value(WrappedValue::I64(left + right )));
-                    },
-                    (WrappedValue::U64(left), WrappedValue::U64(right)) => {
-                        self.stack.push(
-                            StackData::Value(WrappedValue::U64(left + right )));
-                    },
-                    (left, right) => {
-                        println!("unsoported {:?} {:?}", left, right);
-                        unimplemented!()
-                    },
+        // copied from miri
+        macro_rules! int_binops {
+            ($v:ident, $l:ident, $r:ident) => ({
+                match op {
+                    Add    => $v($l + $r),
+                    Sub    => $v($l - $r),
+                    Mul    => $v($l * $r),
+                    Div    => $v($l / $r),
+                    Rem    => $v($l % $r),
+                    BitXor => $v($l ^ $r),
+                    BitAnd => $v($l & $r),
+                    BitOr  => $v($l | $r),
+
+                    // TODO(solson): Can have differently-typed RHS.
+                    Shl => $v($l << $r),
+                    Shr => $v($l >> $r),
+
+                    Eq => Bool($l == $r),
+                    Ne => Bool($l != $r),
+                    Lt => Bool($l < $r),
+                    Le => Bool($l <= $r),
+                    Gt => Bool($l > $r),
+                    Ge => Bool($l >= $r),
                 }
-            },
-            BinOp::Lt => {
-                match (left, right) {
-                    (WrappedValue::I64(left), WrappedValue::I64(right)) => {
-                        self.stack.push(
-                            StackData::Value(WrappedValue::Bool(left < right)));
-                    },
-                    _ => unimplemented!(),
-                }
-            }
-            _ => panic!("unsoported binop {:?}", op)
+            })
         }
+
+
+        let val = StackData::Value(match(left, right) {
+            (I64(l), I64(r)) => int_binops!(I64, l, r),
+            (U64(l), U64(r)) => int_binops!(U64, l, r),
+
+            // copied from miri
+            (Bool(l), Bool(r)) => {
+                Bool(match op {
+                    Eq => l == r,
+                    Ne => l != r,
+                    Lt => l < r,
+                    Le => l <= r,
+                    Gt => l > r,
+                    Ge => l >= r,
+                    BitOr => l | r,
+                    BitXor => l ^ r,
+                    BitAnd => l & r,
+                    Add | Sub | Mul | Div | Rem | Shl | Shr =>
+                        panic!("invalid binary operation on booleans: {:?}", op),
+                })
+
+            },
+
+            _ => unimplemented!()
+        });
+        self.stack.push(val);
+
     }
 }
 

@@ -11,7 +11,6 @@ use moss::mossc::interpret;
 
 use rustc::session::Session;
 use rustc_driver::{driver, CompilerCalls, Compilation};
-use rustc_driver::driver::CompileState;
 
 
 struct MossCompilerCalls;
