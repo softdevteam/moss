@@ -4,12 +4,16 @@ use std::ops::{Deref, DerefMut};
 
 use mossc::{Program, Function, OpCode};
 
+use rustc::mir::repr as mir;
 use rustc::mir::mir_map::MirMap;
 use rustc::ty::TyCtxt;
 use rustc::hir::def_id::DefId;
 
 use rustc::mir::repr::{BinOp, Literal};
+use rustc::util::nodemap::DefIdMap;
 
+use std::rc::Rc;
+use std::cell::RefCell;
 
 //XXX: Is it better to store Tuple/NamedTuple struct on the stack or
 // should we rather use references to them to keep the theme of 64 bit values.
@@ -18,7 +22,7 @@ use rustc::mir::repr::{BinOp, Literal};
 pub enum Address {
     StackLocal(usize),
 
-    // address in tuple, address in vector
+    // (address in stack, address in vector)
     StackComplex(usize, usize),
 
     StaticFunc(DefId),
@@ -49,13 +53,15 @@ pub struct StackCell {
 pub enum StackData {
     None,
 
-    // Flag is used for JUMP_IF, WrappedValue::Bool eventually maps to Flag
-    Flag(bool),
-    Value(WrappedValue),
-    Tuple(WrappedTuple),
+    // Most data is loaded via pointers.
+    // let x = 1;
+    // let y = 2;
 
-    Address(Address),
-    // Value(StackCell<'a, 'tcx>),
+    Pointer(Address),
+
+    Value(WrappedValue),
+
+
     ArgCount(usize),
 }
 
@@ -69,7 +75,7 @@ impl StackData {
     }
 
     fn unwrap_address(&self) -> Address {
-        if let StackData::Address(ref address) = *self {
+        if let StackData::Pointer(ref address) = *self {
             address.clone()
         } else {
             panic!("expected Address found {:?}", self);
@@ -85,7 +91,7 @@ pub enum WrappedValue {
     U64(u64),
     Bool(bool),
     Address(Address),
-    // Tuple(WrappedTuple<'a, 'tcx>),
+    Tuple(WrappedTuple),
     // NamedTuple(W_NamedTuple<'a, 'tcx>),
     // Function(&'a Function<'tcx>),
 }
@@ -113,8 +119,9 @@ impl WrappedTuple {
 //     data: &'a BTreeMap<&'a str, WrappedValue<'a, 'tcx>>,
 // }
 
-struct Interpreter<'cx> {
-    program: &'cx Program<'cx>,
+struct Interpreter<'a, 'cx: 'a> {
+    program: &'a Program<'a>,
+    loader: &'a ModulesLoader<'a, 'cx>,
 
     w_stack: WStack,
     w_stack_pointer: usize,
@@ -125,9 +132,15 @@ struct Interpreter<'cx> {
 type Stack = Vec<StackData>;
 type WStack = Vec<WrappedValue>;
 
-impl<'cx> Interpreter<'cx> {
-    fn new(program: &'cx Program<'cx>) -> Self {
-        Interpreter { program: program, stack: Stack::new(), w_stack: WStack::new(), w_stack_pointer: 0 }
+impl<'a, 'cx> Interpreter<'a, 'cx> {
+    fn new(program: &'a Program<'a>, loader: &'a ModulesLoader<'a, 'cx>) -> Self {
+        Interpreter {
+            program: program,
+            loader: loader,
+            stack: Stack::new(),
+            w_stack: WStack::new(),
+            w_stack_pointer: 0
+        }
     }
 
     // fn load_func(&'cx mut self, defid: DefId) -> &'b Function {
@@ -152,10 +165,10 @@ impl<'cx> Interpreter<'cx> {
     fn to_value(&self, data: &StackData) -> WrappedValue {
         match data {
             &StackData::Value(ref v) => v.clone(),
-            &StackData::Address(Address::StackLocal(ref other)) => {
+            &StackData::Pointer(Address::StackLocal(ref other)) => {
                 self.w_stack[*other].clone()
             },
-            &StackData::Address(Address::StaticFunc(ref def_id)) => {
+            &StackData::Pointer(Address::StaticFunc(ref def_id)) => {
                 WrappedValue::Address(Address::StaticFunc(def_id.clone()))
             },
             _ => panic!("should not load interpreter level object {:?}", data)
@@ -203,7 +216,7 @@ impl<'cx> Interpreter<'cx> {
                 OpCode::LoadFunc(defid) => {
                     // let krate = self.program.get(&defid.krate).unwrap();
                     // let func = krate.get(&defid.index.as_u32()).unwrap();
-                    self.stack.push(StackData::Address(Address::StaticFunc(defid)));
+                    self.stack.push(StackData::Pointer(Address::StaticFunc(defid)));
                 },
 
                 OpCode::ArgCount(size) => {
@@ -213,7 +226,6 @@ impl<'cx> Interpreter<'cx> {
                 OpCode::Call => {
                     self.w_stack_pointer += func_stacksize;
 
-                    // let address = self.stack.pop().unwrap().unwrap_address();
                     let wrapped_address = self.pop_stack_value();
                     if let WrappedValue::Address(address) = wrapped_address {
                         if let Address::StaticFunc(defid) = address {
@@ -235,19 +247,22 @@ impl<'cx> Interpreter<'cx> {
                 },
 
                 OpCode::JUMP_REL_IF(n) => {
-                    if let StackData::Flag(b) = self.stack.pop().unwrap() {
+                    // let data = self.stack.pop().unwrap();
+                    let data = self.pop_stack_value();
+                    if let WrappedValue::Bool(b) = data {
                         if b {
                             pc = (pc as i32 + n) as usize;
                             continue;
                         }
                     } else {
-                        panic!("expected bool");
+                        panic!("expected bool got {:?}", data);
                     }
                 },
 
                 OpCode::TUPLE(n) => self.o_tuple(n),
                 OpCode::TUPLE_ASSIGN(idx) => self.o_tuple_assign(idx),
                 OpCode::TUPLE_GET(idx) => self.o_tuple_get(idx),
+                OpCode::TUPLE_SET(idx) => self.o_tuple_set(idx),
 
                 OpCode::SignedInteger(n) => {
                     self.stack.push(StackData::Value(WrappedValue::I64(n)));
@@ -275,9 +290,8 @@ impl<'cx> Interpreter<'cx> {
                     if let WrappedValue::Address(target) = wrapped_target {
                         match target {
                             Address::StackLocal(idx) => {
-                                let val = self.w_stack[idx].clone();
-                                self.stack.push(StackData::Value(val));
-                            }
+                                self.stack.push(StackData::Pointer(target));
+                            },
                             _ => unimplemented!()
                         }
                     }  else {
@@ -312,23 +326,43 @@ impl<'cx> Interpreter<'cx> {
     }
 
     fn o_tuple(&mut self, size: usize) {
-        self.stack.push(StackData::Tuple(WrappedTuple::with_size(size)));
+        self.stack.push(StackData::Value(WrappedValue::Tuple(WrappedTuple::with_size(size))));
+    }
+
+    fn o_tuple_set(&mut self, idx: usize) {
+        let tuple_address = self.stack.pop().unwrap().unwrap_address();
+        let value = self.pop_stack_value();
+
+        match tuple_address {
+            Address::StackLocal(addr) => {
+                if let WrappedValue::Tuple(ref mut tuple) = self.w_stack[addr] {
+                    tuple.data[idx] = value;
+                }
+            },
+            _ => panic!("can not load tuple at {:?}", tuple_address),
+        }
+
+        // if let WrappedValue::Tuple(ref mut tuple) =  *t {
+        //     tuple.data[idx] = value;
+        // } else {
+        //     panic!("Expected tuple found {:?}", wrapped_tuple);
+        // }
     }
 
     fn o_tuple_assign(&mut self, idx: usize) {
-        let value = self.stack.pop().unwrap().unwrap_value();
+        let value = self.pop_stack_value();
         let mut s_tuple = self.stack.last_mut().unwrap();
 
-        if let StackData::Tuple(ref mut WrappedTuple) = *s_tuple  {
-            WrappedTuple.data[idx] = value;
+        if let StackData::Value(WrappedValue::Tuple(ref mut tuple)) = *s_tuple  {
+            tuple.data[idx] = value;
         } else {
             panic!("Expected tuple found {:?}", s_tuple);
         }
     }
 
     fn o_tuple_get(&mut self, idx: usize) {
-        let s_tuple = self.stack.pop().unwrap();
-        if let StackData::Tuple(ref WrappedTuple) = s_tuple {
+        let s_tuple = self.pop_stack_value();
+        if let WrappedValue::Tuple(ref WrappedTuple) = s_tuple {
             //XXX: do we have to consider move semantics here?
             let value = WrappedTuple.data[idx].clone();
             self.stack.push(StackData::Value(value));
@@ -342,10 +376,10 @@ impl<'cx> Interpreter<'cx> {
         //XXXX
         let val = match v {
             StackData::Value(v) => v,
-            StackData::Address(Address::StackLocal(other)) => {
+            StackData::Pointer(Address::StackLocal(other)) => {
                 self.w_stack[other].clone()
             },
-            StackData::Address(Address::StaticFunc(defid)) => {
+            StackData::Pointer(Address::StaticFunc(defid)) => {
                 WrappedValue::Address(Address::StaticFunc(defid))
             },
             _ => panic!("should not store interpreter level object {:?}", v)
@@ -358,7 +392,7 @@ impl<'cx> Interpreter<'cx> {
         // let val = &self.w_stack[self.w_stack_pointer + idx];
         // clone the pointer to the old value
         // self.stack.push(unwrap_value());
-        self.stack.push(StackData::Address(Address::StackLocal(self.w_stack_pointer + idx)))
+        self.stack.push(StackData::Pointer(Address::StackLocal(self.w_stack_pointer + idx)))
     }
 
     fn o_binop(&mut self, op: BinOp) {
@@ -426,9 +460,61 @@ impl<'cx> Interpreter<'cx> {
 }
 
 
-pub fn interpret(program: &Program, main: DefId, tcx: &TyCtxt, map: &MirMap){
-    let node_id = tcx.map.as_local_node_id(main).unwrap();
-    let mir = map.map.get(&node_id).unwrap();
-    let mut interpreter = Interpreter::new(program);
+#[derive(Clone)]
+enum CachedMir<'mir, 'tcx: 'mir> {
+    Ref(&'mir mir::Mir<'tcx>),
+    Owned(Rc<mir::Mir<'tcx>>)
+}
+
+struct ModulesLoader<'a, 'tcx: 'a> {
+    tcx: TyCtxt<'a, 'tcx, 'tcx>,
+    mir_cache: RefCell<DefIdMap<Rc<mir::Mir<'tcx>>>>,
+    mir_map: &'a MirMap<'tcx>,
+}
+
+impl<'a, 'tcx> ModulesLoader<'a, 'tcx> {
+    fn new(tcx: TyCtxt<'a, 'tcx, 'tcx>, mir_map: &'a MirMap<'tcx>) -> Self {
+        ModulesLoader {
+            tcx: tcx,
+            mir_map: mir_map,
+            mir_cache: RefCell::new(DefIdMap())
+        }
+    }
+
+    fn load_mir(&self, def_id: DefId) -> CachedMir<'a, 'tcx> {
+        match self.tcx.map.as_local_node_id(def_id) {
+            Some(node_id) => CachedMir::Ref(self.mir_map.map.get(&node_id).unwrap()),
+            None => {
+                let mut mir_cache = self.mir_cache.borrow_mut();
+                if let Some(mir) = mir_cache.get(&def_id) {
+                    return CachedMir::Owned(mir.clone());
+                }
+
+                let cs = &self.tcx.sess.cstore;
+                let mir = cs.maybe_get_item_mir(self.tcx, def_id).unwrap_or_else(|| {
+                    panic!("no mir for {:?}", def_id);
+                });
+                let cached = Rc::new(mir);
+                mir_cache.insert(def_id, cached.clone());
+                CachedMir::Owned(cached)
+            }
+        }
+    }
+}
+
+pub fn interpret<'a, 'tcx>(
+        program: &'a Program<'a>,
+        main: DefId,
+        tcx: TyCtxt<'a, 'tcx, 'tcx>,
+        map: &MirMap<'tcx>
+        ){
+
+    // let node_id = tcx.map.as_local_node_id(main).unwrap();
+    // let mir = map.map.get(&node_id).unwrap();
+
+    let loader = ModulesLoader::new(tcx, map);
+    loader.load_mir(main);
+    let mut interpreter = Interpreter::new(program, &loader);
+
     interpreter.run(main);
 }

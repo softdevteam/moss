@@ -16,7 +16,8 @@ pub use rustc::mir::repr::{
     BinOp, Constant, Literal, Operand,
     Lvalue, Rvalue,
     Statement, StatementKind, Terminator, TerminatorKind,
-    ProjectionElem, AggregateKind
+    ProjectionElem, AggregateKind,
+    Field
 };
 
 use rustc::mir::mir_map::MirMap;
@@ -25,7 +26,7 @@ use rustc::middle::const_val::ConstVal;
 use rustc::hir::map::Node;
 use rustc::hir::def_id::DefId;
 
-use rustc::ty::TyCtxt;
+use rustc::ty::{TyCtxt, AdtKind, VariantKind};
 
 // use rustc_const_math::ConstInt;
 use syntax::parse::token::InternedString;
@@ -85,7 +86,10 @@ pub enum OpCode<'tcx>{
     TUPLE(usize),
     VEC(usize),
 
+    //XXX: used for creation of tuple
     TUPLE_ASSIGN(usize),
+
+    TUPLE_SET(usize),
     TUPLE_GET(usize),
 
     TODO(&'static str),
@@ -104,13 +108,13 @@ pub enum OpCode<'tcx>{
 }
 
 struct FuncGen<'a, 'tcx: 'a> {
-    tcx: &'a TyCtxt<'tcx>,
+    tcx: &'a TyCtxt<'a, 'tcx, 'tcx>,
     map: &'a MirMap<'tcx>,
     blocks: Vec<Vec<OpCode<'a>>>
 }
 
 impl<'a, 'tcx: 'a> FuncGen<'a, 'tcx> {
-    fn new(tcx: &'a TyCtxt<'tcx>, map: &'a MirMap<'tcx>) -> Self {
+    fn new(tcx: &'a TyCtxt<'a, 'tcx, 'tcx>, map: &'a MirMap<'tcx>) -> Self {
         FuncGen{ tcx: tcx, map: map, blocks: Vec::new() }
     }
 
@@ -124,14 +128,14 @@ impl<'a, 'tcx: 'a> FuncGen<'a, 'tcx> {
 }
 
 struct BlockGen<'a, 'tcx: 'a> {
-    tcx: &'a TyCtxt<'tcx>,
+    tcx: &'a TyCtxt<'a, 'tcx, 'tcx>,
     map: &'a MirMap<'tcx>,
 
     opcodes: Vec<OpCode<'a>>
 }
 
 impl<'a, 'tcx: 'a> BlockGen<'a, 'tcx> {
-    fn new(tcx: &'a TyCtxt<'tcx>, map: &'a MirMap<'tcx>) -> Self {
+    fn new(tcx: &'a TyCtxt<'a, 'tcx, 'tcx>, map: &'a MirMap<'tcx>) -> Self {
         BlockGen{ tcx: tcx, map: map, opcodes: Vec::new() }
     }
 
@@ -162,6 +166,14 @@ impl<'a, 'tcx: 'a> BlockGen<'a, 'tcx> {
                         self.opcodes.push(opcode);
                         OpCode::DEREF_STORE
                         // OpCode::TODO_S(format!("deref projection {:?}:{:?}", proj.elem, proj.base))
+                    },
+
+                    ProjectionElem::Field(field, _type) => {
+                        let opcode = self.load_lvalue(&proj.base);
+                        self.opcodes.push(opcode);
+
+                        let index = field.index();
+                        OpCode::TUPLE_SET(index)
                     },
 
                     _ => OpCode::TODO_S(format!("assign projection {:?}", proj.elem)),
@@ -245,8 +257,47 @@ impl<'a, 'tcx: 'a> BlockGen<'a, 'tcx> {
             Rvalue::Aggregate(AggregateKind::Vec, ref vec) => {
                 self.opcodes.push(OpCode::VEC(vec.len()));
             },
-            Rvalue::Aggregate(_, ref _vec) => {
-                self.opcodes.push(OpCode::TODO("AggrKind"));
+            Rvalue::Aggregate(AggregateKind::Adt(adt_def, size, _subst), ref operands) => {
+                /*
+                    Adt (abstract data type) is an enum. Structs are enums with only one variant.
+                    To check whether an adt is an enum or a struct one can use `.adt_kind`.
+
+
+                    Variants are either VariantKind::{Struct, Tuple, Unit}
+                */
+
+                for operand in operands.iter() {
+                    self.rvalue_operand(operand)
+                }
+
+                if adt_def.adt_kind() == AdtKind::Struct {
+                    let ref struct_def = adt_def.variants[0];
+                    match struct_def.kind {
+                        VariantKind::Struct => {
+                            for field in struct_def.fields.iter() {
+                                println!("{:?}", field.name);
+                            }
+                        },
+                        VariantKind::Tuple => {
+                            //doesn't really make sense at this point
+                            //we can just use indicies
+                            for field in struct_def.fields.iter() {
+                                println!("{:?}", field.name);
+                            }
+                        },
+                        VariantKind::Unit => {},
+                    }
+
+                }
+                // println!("S: {:?}", size);
+                // for var in adt_def.variants.iter() {
+                    // println!("X: {:?}", var.name);
+                // }
+                // println!("{:?}", adt_def.variants.iter().map(|var| var.name).collect());
+                self.opcodes.push(OpCode::TODO("Aggr Adt"));
+            },
+            Rvalue::Aggregate(AggregateKind::Closure(_def_id, _subst), ref _aggr) => {
+                self.opcodes.push(OpCode::TODO("Aggr Closure"));
             },
 
             Rvalue::Ref(ref region, ref kind, ref lvalue) => {
@@ -389,7 +440,7 @@ impl<'a, 'tcx: 'a> BlockGen<'a, 'tcx> {
 
 
 pub type Function<'tcx> = Vec<OpCode<'tcx>>;
-pub type Program<'tcx> = BTreeMap<u32, BTreeMap<u32, Function<'tcx>>>;
+pub type Program<'a> = BTreeMap<u32, BTreeMap<u32, Function<'a>>>;
 
 
 fn optimize_blocks<'tcx>(blocks: &Vec<Vec<OpCode<'tcx>>>, mir: &Mir) -> Vec<OpCode<'tcx>> {
@@ -458,7 +509,7 @@ fn optimize_blocks<'tcx>(blocks: &Vec<Vec<OpCode<'tcx>>>, mir: &Mir) -> Vec<OpCo
 
 
 
-pub fn generate_bytecode<'a, 'tcx>(tcx: &'a TyCtxt<'tcx>, map: &'a MirMap<'tcx>) -> (Program<'a>, DefId) {
+pub fn generate_bytecode<'a, 'tcx>(tcx: &'a TyCtxt<'a, 'tcx, 'tcx>, map: &'a MirMap<'tcx>) -> (Program<'a>, DefId) {
 
     //map krate num -> node id
     let mut program: Program = BTreeMap::new();
