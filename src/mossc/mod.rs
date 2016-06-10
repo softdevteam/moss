@@ -28,10 +28,44 @@ use rustc::hir::def_id::DefId;
 
 use rustc::ty::{TyCtxt, AdtKind, VariantKind};
 
+use std::ops::{Deref, DerefMut};
+
 // use rustc_const_math::ConstInt;
-use syntax::parse::token::InternedString;
+// use syntax::parse::token::InternedString;
 
 pub mod interpret;
+
+pub type Function<'tcx> = Vec<OpCode<'tcx>>;
+
+// pub type KrateTree<'a> = BTreeMap<u32, BTreeMap<u32, Function<'a>>>;
+pub type KrateTree<'a> = BTreeMap<DefId, Function<'a>>;
+//Program: krate_id -> node_id -> Function
+// pub type Program<'a> = BTreeMap<u32, BTreeMap<u32, Function<'a>>>;
+
+pub struct Program<'a> {
+    pub krates: KrateTree<'a>
+}
+
+impl<'a> Program<'a> {
+    fn new() -> Program<'a> {
+        Program {krates: BTreeMap::new() }
+    }
+}
+
+impl<'a> Deref for Program<'a> {
+    type Target = KrateTree<'a>;
+
+    fn deref(&self) -> &KrateTree<'a> {
+        &self.krates
+    }
+}
+
+impl<'a> DerefMut for Program<'a> {
+
+    fn deref_mut<'b>(&'b mut self) -> &'b mut KrateTree<'a> {
+        &mut self.krates
+    }
+}
 
 #[derive(Debug, Clone)]
 pub enum Var {
@@ -107,36 +141,123 @@ pub enum OpCode<'tcx>{
 
 }
 
-struct FuncGen<'a, 'tcx: 'a> {
-    tcx: &'a TyCtxt<'a, 'tcx, 'tcx>,
-    map: &'a MirMap<'tcx>,
-    blocks: Vec<Vec<OpCode<'a>>>
+
+pub struct Context<'a, 'tcx: 'a> {
+    pub tcx: TyCtxt<'a, 'tcx, 'tcx>,
+    pub map: &'a MirMap<'tcx>
 }
 
-impl<'a, 'tcx: 'a> FuncGen<'a, 'tcx> {
-    fn new(tcx: &'a TyCtxt<'a, 'tcx, 'tcx>, map: &'a MirMap<'tcx>) -> Self {
-        FuncGen{ tcx: tcx, map: map, blocks: Vec::new() }
+
+impl<'a, 'tcx> Context<'a, 'tcx> {
+
+    pub fn mir_to_bytecode(&'a self, func: &Mir<'a>) -> Function<'a> {
+        let blocks = func.basic_blocks.iter().map(
+            |bb| BlockGen::analyse(bb)).collect();
+
+        self.optimize_blocks(&blocks, func)
     }
 
-    fn analyse(&mut self, func: &Mir<'a>) {
-        for block in &func.basic_blocks {
-            let mut bg = BlockGen::new(self.tcx, self.map);
-            bg.analyse_block(block);
-            self.blocks.push(bg.opcodes);
+    fn optimize_blocks(&'a self, blocks: &Vec<Function<'a>>, func: &Mir<'a>) -> Function<'a> {
+        let mut indicies = Vec::new();
+        let mut n = 0_usize;
+        for block in blocks {
+            indicies.push(n);
+            n += block.len();
         }
+
+        let var_offset = func.arg_decls.len();
+        let tmp_offset = var_offset + func.var_decls.len();
+
+        let mut opcodes = Vec::new();
+
+        for block in blocks {
+            for opcode in block.iter() {
+                let oc: OpCode = match *opcode {
+                    OpCode::_Goto(ref target) => OpCode::JUMP(indicies[target.index()]),
+                    OpCode::_GotoIf(ref target) => OpCode::JUMP_IF(indicies[target.index()]),
+
+                    OpCode::Load(Var::Arg, n) => OpCode::LoadLocal(n as usize),
+                    OpCode::Load(Var::Var, n) => OpCode::LoadLocal(var_offset + n as usize),
+                    OpCode::Load(Var::Tmp, n) => OpCode::LoadLocal(tmp_offset + n as usize),
+                    OpCode::Store(Var::Arg, n) => OpCode::StoreLocal(n as usize),
+                    OpCode::Store(Var::Var, n) => OpCode::StoreLocal(var_offset + n as usize),
+                    OpCode::Store(Var::Tmp, n) => OpCode::StoreLocal(tmp_offset + n as usize),
+                    _ => opcode.clone(),
+                };
+                opcodes.push(oc);
+            }
+        }
+
+        let mut opcodes_rel = vec![OpCode::StackFrame(tmp_offset+func.temp_decls.len())];
+
+        for (ii, opcode) in opcodes.iter_mut().enumerate() {
+            let i = ii as i32;
+            let oc: Option<OpCode> = match *opcode {
+                OpCode::JUMP(target) => {
+                    let dist = target as i32 - i;
+                    // if dist == 1 {
+                        // None
+                    // } else {
+                        Some(OpCode::JUMP_REL(dist))
+                    // }
+                },
+                OpCode::JUMP_IF(target) => {
+                    let dist = target as i32 - i;
+                    // if dist == 1 {
+                        // None
+                    // } else {
+                        Some(OpCode::JUMP_REL_IF(dist))
+                    // }
+                },
+                _ => Some(opcode.clone())
+            };
+
+            if let Some(op) = oc {
+                opcodes_rel.push(op);
+            }
+        }
+
+
+        opcodes_rel
     }
 }
 
-struct BlockGen<'a, 'tcx: 'a> {
-    tcx: &'a TyCtxt<'a, 'tcx, 'tcx>,
-    map: &'a MirMap<'tcx>,
+// }
 
-    opcodes: Vec<OpCode<'a>>
+// struct FuncGen<'a, 'tcx: 'a> {
+//     tcx: &'a TyCtxt<'a, 'tcx, 'tcx>,
+//     map: &'a MirMap<'tcx>,
+//     blocks: Vec<Vec<OpCode<'a>>>
+// }
+
+// impl<'a, 'tcx: 'a> FuncGen<'a, 'tcx> {
+//     fn new(tcx: &'a TyCtxt<'a, 'tcx, 'tcx>, map: &'a MirMap<'tcx>) -> Self {
+//         FuncGen{ tcx: tcx, map: map, blocks: Vec::new() }
+//     }
+
+//     fn analyse(&mut self, func: &Mir<'a>) {
+//         for block in &func.basic_blocks {
+//             let mut bg = BlockGen::new(self.tcx, self.map);
+//             bg.analyse_block(block);
+//             self.blocks.push(bg.opcodes);
+//         }
+//     }
+// }
+
+struct BlockGen<'a>{
+    opcodes: Function<'a>
 }
 
-impl<'a, 'tcx: 'a> BlockGen<'a, 'tcx> {
-    fn new(tcx: &'a TyCtxt<'a, 'tcx, 'tcx>, map: &'a MirMap<'tcx>) -> Self {
-        BlockGen{ tcx: tcx, map: map, opcodes: Vec::new() }
+impl<'a> BlockGen<'a> {
+    fn analyse(block: &BasicBlockData<'a>) ->Function<'a> {
+        let mut this = Self::new();
+        this.analyse_block(block);
+
+        this.opcodes
+    }
+
+    fn new() -> Self {
+        BlockGen{ opcodes: Vec::new() }
     }
 
     fn analyse_block(&mut self, block: &BasicBlockData<'a>) {
@@ -193,9 +314,6 @@ impl<'a, 'tcx: 'a> BlockGen<'a, 'tcx> {
         self.opcodes.push(opcode);
     }
 
-    fn deref_lvalue(&mut self) {
-    }
-
     fn analyse_terminator(&mut self, terminator: &Terminator<'a>) {
         let op = match terminator.kind {
             TerminatorKind::Goto{target} => OpCode::_Goto(target),
@@ -224,7 +342,7 @@ impl<'a, 'tcx: 'a> BlockGen<'a, 'tcx> {
                 // OpCode::TODO("CALL")
             },
 
-            TerminatorKind::Drop{value: ref lvalue, target, unwind} => {
+            TerminatorKind::Drop{value: ref lvalue, target: _, unwind: _} => {
                 let opcode = self.load_lvalue(lvalue);
                 self.opcodes.push(opcode);
                 OpCode::TODO("Drop")
@@ -257,7 +375,7 @@ impl<'a, 'tcx: 'a> BlockGen<'a, 'tcx> {
             Rvalue::Aggregate(AggregateKind::Vec, ref vec) => {
                 self.opcodes.push(OpCode::VEC(vec.len()));
             },
-            Rvalue::Aggregate(AggregateKind::Adt(adt_def, size, _subst), ref operands) => {
+            Rvalue::Aggregate(AggregateKind::Adt(adt_def, _size, _subst), ref operands) => {
                 /*
                     Adt (abstract data type) is an enum. Structs are enums with only one variant.
                     To check whether an adt is an enum or a struct one can use `.adt_kind`.
@@ -300,7 +418,7 @@ impl<'a, 'tcx: 'a> BlockGen<'a, 'tcx> {
                 self.opcodes.push(OpCode::TODO("Aggr Closure"));
             },
 
-            Rvalue::Ref(ref region, ref kind, ref lvalue) => {
+            Rvalue::Ref(ref _region, ref kind, ref lvalue) => {
                 let opcode = self.load_lvalue(lvalue);
                 self.opcodes.push(opcode);
                 self.opcodes.push(OpCode::BORROW(*kind));
@@ -393,7 +511,7 @@ impl<'a, 'tcx: 'a> BlockGen<'a, 'tcx> {
         }
     }
 
-    fn unpack_const(&self, literal: &Literal) -> OpCode<'tcx> {
+    fn unpack_const(&self, literal: &Literal) -> OpCode<'a> {
         match *literal {
             Literal::Value{ ref value } => {
                 use rustc_const_math::ConstInt::*;
@@ -418,7 +536,7 @@ impl<'a, 'tcx: 'a> BlockGen<'a, 'tcx> {
                     unimplemented!();
                 }
             },
-            Literal::Item{def_id, ..} => {
+            Literal::Item{def_id: _, ..} => {
                 //let x = &42; will generate a reference to a static variable
                 // println!("{:?}", def_id);
                 unimplemented!()
@@ -439,96 +557,27 @@ impl<'a, 'tcx: 'a> BlockGen<'a, 'tcx> {
 }
 
 
-pub type Function<'tcx> = Vec<OpCode<'tcx>>;
-pub type Program<'a> = BTreeMap<u32, BTreeMap<u32, Function<'a>>>;
-
-
-fn optimize_blocks<'tcx>(blocks: &Vec<Vec<OpCode<'tcx>>>, mir: &Mir) -> Vec<OpCode<'tcx>> {
-    let mut indicies = Vec::new();
-    let mut n = 0_usize;
-    for block in blocks {
-        indicies.push(n);
-        n += block.len();
-    }
-
-    let var_offset = mir.arg_decls.len();
-    let tmp_offset = var_offset + mir.var_decls.len();
-
-    let mut opcodes = Vec::new();
-
-    for block in blocks {
-        for opcode in block.iter() {
-            let oc: OpCode = match *opcode {
-                OpCode::_Goto(ref target) => OpCode::JUMP(indicies[target.index()]),
-                OpCode::_GotoIf(ref target) => OpCode::JUMP_IF(indicies[target.index()]),
-
-                OpCode::Load(Var::Arg, n) => OpCode::LoadLocal(n as usize),
-                OpCode::Load(Var::Var, n) => OpCode::LoadLocal(var_offset + n as usize),
-                OpCode::Load(Var::Tmp, n) => OpCode::LoadLocal(tmp_offset + n as usize),
-                OpCode::Store(Var::Arg, n) => OpCode::StoreLocal(n as usize),
-                OpCode::Store(Var::Var, n) => OpCode::StoreLocal(var_offset + n as usize),
-                OpCode::Store(Var::Tmp, n) => OpCode::StoreLocal(tmp_offset + n as usize),
-                _ => opcode.clone(),
-            };
-            opcodes.push(oc);
-        }
-    }
-
-    let mut opcodes_rel = vec![OpCode::StackFrame(tmp_offset+mir.temp_decls.len())];
-
-    for (ii, opcode) in opcodes.iter_mut().enumerate() {
-        let i = ii as i32;
-        let oc: Option<OpCode> = match *opcode {
-            OpCode::JUMP(target) => {
-                let dist = target as i32 - i;
-                // if dist == 1 {
-                    // None
-                // } else {
-                    Some(OpCode::JUMP_REL(dist))
-                // }
-            },
-            OpCode::JUMP_IF(target) => {
-                let dist = target as i32 - i;
-                // if dist == 1 {
-                    // None
-                // } else {
-                    Some(OpCode::JUMP_REL_IF(dist))
-                // }
-            },
-            _ => Some(opcode.clone())
-        };
-
-        if let Some(op) = oc {
-            opcodes_rel.push(op);
-        }
-    }
-
-
-    opcodes_rel
-}
-
-
-
-pub fn generate_bytecode<'a, 'tcx>(tcx: &'a TyCtxt<'a, 'tcx, 'tcx>, map: &'a MirMap<'tcx>) -> (Program<'a>, DefId) {
+pub fn generate_bytecode<'a, 'tcx>(context: &'a Context<'a, 'tcx>) -> (Program<'a>, DefId) {
 
     //map krate num -> node id
-    let mut program: Program = BTreeMap::new();
+    let mut program = Program::new();
     // let mut build_ins: BTreeMap<u32, BTreeMap<u32, &'a InternedString>> = BTreeMap::new();
     let mut main: Option<DefId> = None;
 
-    for (key, func_mir) in &map.map {
+    for (key, func_mir) in &context.map.map {
         // let mir = map.map.get(key).unwrap();
         // println!("{:?}", mir.id);
-        let def_index = tcx.map.local_def_id(*key);
+        let def_index = context.tcx.map.local_def_id(*key);
 
-        if let Node::NodeItem(item) = tcx.map.get(key.to_owned()) {
+        if let Node::NodeItem(item) = context.tcx.map.get(key.to_owned()) {
             // println!("Function: {:?} {:?}", item.name.as_str(), def_index.index.as_u32());
-                let mut collector = FuncGen::new(tcx, map);
-                collector.analyse(&func_mir);
+                // let mut collector = FuncGen::new(&context.tcx, context.map);
+                // collector.analyse(&func_mir);
                 // for (i, block) in collector.blocks.iter().enumerate() {
                 //     // println!("{} {:?}", i, block);
                 // }
-                let blocks = optimize_blocks(&collector.blocks, func_mir);
+                // let blocks = optimize_blocks(&collector.blocks, func_mir);
+                let blocks: Function = context.mir_to_bytecode(func_mir);
 
                 if item.name.as_str().starts_with("__") {
                     // TODO
@@ -536,7 +585,9 @@ pub fn generate_bytecode<'a, 'tcx>(tcx: &'a TyCtxt<'a, 'tcx, 'tcx>, map: &'a Mir
                     // has something to do with lifetimes (what else)
                     // build_ins.entry(def_index.krate).or_insert(BTreeMap::new()).insert(def_index.index.as_u32(), &item.name.as_str());
                 } else {
-                    program.entry(def_index.krate).or_insert(BTreeMap::new()).insert(def_index.index.as_u32(), blocks);
+                    // program.krates.entry(def_index.krate).or_insert(BTreeMap::new()).insert(def_index.index.as_u32(), blocks);
+
+                    program.krates.insert(def_index, blocks);
 
                     if def_index.krate == 0 && item.name.as_str() == "main" {
                         main = Some(def_index);
@@ -551,14 +602,14 @@ pub fn generate_bytecode<'a, 'tcx>(tcx: &'a TyCtxt<'a, 'tcx, 'tcx>, map: &'a Mir
     //     println!("Node ID: {:?}", id);
     // }
 
-    for (_, krate) in program.iter() {
-        for (func, block) in krate {
+    for (func, block) in program.krates.iter() {
+        // for (func, block) in krate {
             println!("Func {:?}", func);
             for (i, opcode) in block.iter().enumerate() {
                 println!("{} {:?}",i, opcode);
             }
             println!("");
-        }
+        // }
     }
 
     (program, main.unwrap())

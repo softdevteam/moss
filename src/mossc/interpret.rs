@@ -1,19 +1,20 @@
 
-use std::collections::BTreeMap;
-use std::ops::{Deref, DerefMut};
-
-use mossc::{Program, Function, OpCode};
-
-use rustc::mir::repr as mir;
-use rustc::mir::mir_map::MirMap;
-use rustc::ty::TyCtxt;
-use rustc::hir::def_id::DefId;
-
-use rustc::mir::repr::{BinOp, Literal};
-use rustc::util::nodemap::DefIdMap;
 
 use std::rc::Rc;
 use std::cell::RefCell;
+
+use rustc::mir::repr as mir;
+use rustc::mir::mir_map::MirMap;
+use rustc::mir::repr::BinOp;
+use rustc::hir::def_id::DefId;
+use rustc::ty::TyCtxt;
+use rustc::util::nodemap::DefIdMap;
+
+
+use mossc::{Program, Function, OpCode};
+
+use std::ops::{Deref};
+
 
 //XXX: Is it better to store Tuple/NamedTuple struct on the stack or
 // should we rather use references to them to keep the theme of 64 bit values.
@@ -106,7 +107,7 @@ pub struct WrappedTuple {
 impl WrappedTuple {
     fn with_size(size: usize) -> Self {
         let mut v = Vec::with_capacity(size);
-        for idx in 0..size {
+        for _ in 0..size {
             v.push(WrappedValue::None);
         }
 
@@ -149,9 +150,11 @@ impl<'a, 'cx> Interpreter<'a, 'cx> {
     // }
 
     fn run(&mut self, main: DefId) {
-        let krate = self.program.get(&main.krate).unwrap();
-        let main_func = krate.get(&main.index.as_u32()).unwrap();
-        // let main_func = self.load_func(main);
+        // let krate = self.program.krates.get(&main.krate).unwrap();
+        // let main_func = krate.get(&main.index.as_u32()).unwrap();
+
+        let main_func = self.program.get(&main).unwrap();
+
         self.eval_func(main_func);
     }
 
@@ -229,8 +232,15 @@ impl<'a, 'cx> Interpreter<'a, 'cx> {
                     let wrapped_address = self.pop_stack_value();
                     if let WrappedValue::Address(address) = wrapped_address {
                         if let Address::StaticFunc(defid) = address {
-                            let krate = self.program.get(&defid.krate).unwrap();
-                            let func = krate.get(&defid.index.as_u32()).unwrap();
+
+                            // let mir = self.loader.load_mir(defid);
+
+                            // let mut fg = FuncGen::new(&self.loader.tcx, &self.loader.mir_map);
+                            // fg.analyse(&*mir);
+
+                            // let krate = self.program.krates.get(&defid.krate).unwrap();
+                            // let func = krate.get(&defid.index.as_u32()).unwrap();
+                            let func = self.program.get(&defid).unwrap();
                             self.eval_func(func);
                         } else {
                             panic!("Expected func got {:?}", address);
@@ -289,7 +299,7 @@ impl<'a, 'cx> Interpreter<'a, 'cx> {
                     let wrapped_target = self.pop_stack_value();
                     if let WrappedValue::Address(target) = wrapped_target {
                         match target {
-                            Address::StackLocal(idx) => {
+                            Address::StackLocal(_idx) => {
                                 self.stack.push(StackData::Pointer(target));
                             },
                             _ => unimplemented!()
@@ -362,9 +372,9 @@ impl<'a, 'cx> Interpreter<'a, 'cx> {
 
     fn o_tuple_get(&mut self, idx: usize) {
         let s_tuple = self.pop_stack_value();
-        if let WrappedValue::Tuple(ref WrappedTuple) = s_tuple {
+        if let WrappedValue::Tuple(ref wrapped_tuple) = s_tuple {
             //XXX: do we have to consider move semantics here?
-            let value = WrappedTuple.data[idx].clone();
+            let value = wrapped_tuple.data[idx].clone();
             self.stack.push(StackData::Value(value));
         } else {
             panic!("Expected tuple found {:?}", s_tuple);
@@ -464,6 +474,17 @@ impl<'a, 'cx> Interpreter<'a, 'cx> {
 enum CachedMir<'mir, 'tcx: 'mir> {
     Ref(&'mir mir::Mir<'tcx>),
     Owned(Rc<mir::Mir<'tcx>>)
+}
+
+impl<'mir, 'tcx> Deref for CachedMir<'mir, 'tcx> {
+    type Target = mir::Mir<'tcx>;
+
+    fn deref(&self) -> &mir::Mir<'tcx> {
+        match *self {
+            CachedMir::Ref(ref mir) => mir,
+            CachedMir::Owned(ref mir) => mir,
+        }
+    }
 }
 
 struct ModulesLoader<'a, 'tcx: 'a> {
