@@ -120,9 +120,9 @@ impl WrappedTuple {
 //     data: &'a BTreeMap<&'a str, WrappedValue<'a, 'tcx>>,
 // }
 
-struct Interpreter<'a, 'cx: 'a> {
-    program: &'a Program<'a>,
-    loader: &'a ModulesLoader<'a, 'cx>,
+struct Interpreter<'p, 'a: 'p, 'cx: 'a> {
+    program: &'p mut Program<'a, 'cx>,
+    // loader: &'a ModulesLoader<'a, 'cx>,
 
     w_stack: WStack,
     w_stack_pointer: usize,
@@ -133,11 +133,10 @@ struct Interpreter<'a, 'cx: 'a> {
 type Stack = Vec<StackData>;
 type WStack = Vec<WrappedValue>;
 
-impl<'a, 'cx> Interpreter<'a, 'cx> {
-    fn new(program: &'a Program<'a>, loader: &'a ModulesLoader<'a, 'cx>) -> Self {
+impl<'p, 'a, 'cx> Interpreter<'p, 'a, 'cx> {
+    fn new(program: &'p mut Program<'a, 'cx>) -> Self {
         Interpreter {
             program: program,
-            loader: loader,
             stack: Stack::new(),
             w_stack: WStack::new(),
             w_stack_pointer: 0
@@ -150,12 +149,15 @@ impl<'a, 'cx> Interpreter<'a, 'cx> {
     // }
 
     fn run(&mut self, main: DefId) {
-        // let krate = self.program.krates.get(&main.krate).unwrap();
-        // let main_func = krate.get(&main.index.as_u32()).unwrap();
+        let main_func = self.program.get_func(main);
+        // {
+            // let main_func = self.program.get_func(main);
+        // }
+        // let main_func = self.program.get_func(main);
 
-        let main_func = self.program.get(&main).unwrap();
 
-        self.eval_func(main_func);
+
+        self.eval_func(&main_func);
     }
 
     // fn deref(&mut self, address: Address) -> WrappedValue {
@@ -231,7 +233,7 @@ impl<'a, 'cx> Interpreter<'a, 'cx> {
 
                     let wrapped_address = self.pop_stack_value();
                     if let WrappedValue::Address(address) = wrapped_address {
-                        if let Address::StaticFunc(defid) = address {
+                        if let Address::StaticFunc(def_id) = address {
 
                             // let mir = self.loader.load_mir(defid);
 
@@ -240,8 +242,9 @@ impl<'a, 'cx> Interpreter<'a, 'cx> {
 
                             // let krate = self.program.krates.get(&defid.krate).unwrap();
                             // let func = krate.get(&defid.index.as_u32()).unwrap();
-                            let func = self.program.get(&defid).unwrap();
-                            self.eval_func(func);
+                            // let func = self.program.get(&defid).unwrap();
+                            let func = self.program.get_func(def_id);
+                            self.eval_func(&func);
                         } else {
                             panic!("Expected func got {:?}", address);
                         }
@@ -470,61 +473,61 @@ impl<'a, 'cx> Interpreter<'a, 'cx> {
 }
 
 
-#[derive(Clone)]
-enum CachedMir<'mir, 'tcx: 'mir> {
-    Ref(&'mir mir::Mir<'tcx>),
-    Owned(Rc<mir::Mir<'tcx>>)
-}
+// #[derive(Clone)]
+// enum CachedMir<'mir, 'tcx: 'mir> {
+//     Ref(&'mir mir::Mir<'tcx>),
+//     Owned(Rc<mir::Mir<'tcx>>)
+// }
 
-impl<'mir, 'tcx> Deref for CachedMir<'mir, 'tcx> {
-    type Target = mir::Mir<'tcx>;
+// impl<'mir, 'tcx> Deref for CachedMir<'mir, 'tcx> {
+//     type Target = mir::Mir<'tcx>;
 
-    fn deref(&self) -> &mir::Mir<'tcx> {
-        match *self {
-            CachedMir::Ref(ref mir) => mir,
-            CachedMir::Owned(ref mir) => mir,
-        }
-    }
-}
+//     fn deref(&self) -> &mir::Mir<'tcx> {
+//         match *self {
+//             CachedMir::Ref(ref mir) => mir,
+//             CachedMir::Owned(ref mir) => mir,
+//         }
+//     }
+// }
 
-struct ModulesLoader<'a, 'tcx: 'a> {
-    tcx: TyCtxt<'a, 'tcx, 'tcx>,
-    mir_cache: RefCell<DefIdMap<Rc<mir::Mir<'tcx>>>>,
-    mir_map: &'a MirMap<'tcx>,
-}
+// struct ModulesLoader<'a, 'tcx: 'a> {
+//     tcx: TyCtxt<'a, 'tcx, 'tcx>,
+//     mir_cache: RefCell<DefIdMap<Rc<mir::Mir<'tcx>>>>,
+//     mir_map: &'a MirMap<'tcx>,
+// }
 
-impl<'a, 'tcx> ModulesLoader<'a, 'tcx> {
-    fn new(tcx: TyCtxt<'a, 'tcx, 'tcx>, mir_map: &'a MirMap<'tcx>) -> Self {
-        ModulesLoader {
-            tcx: tcx,
-            mir_map: mir_map,
-            mir_cache: RefCell::new(DefIdMap())
-        }
-    }
+// impl<'a, 'tcx> ModulesLoader<'a, 'tcx> {
+//     fn new(tcx: TyCtxt<'a, 'tcx, 'tcx>, mir_map: &'a MirMap<'tcx>) -> Self {
+//         ModulesLoader {
+//             tcx: tcx,
+//             mir_map: mir_map,
+//             mir_cache: RefCell::new(DefIdMap())
+//         }
+//     }
 
-    fn load_mir(&self, def_id: DefId) -> CachedMir<'a, 'tcx> {
-        match self.tcx.map.as_local_node_id(def_id) {
-            Some(node_id) => CachedMir::Ref(self.mir_map.map.get(&node_id).unwrap()),
-            None => {
-                let mut mir_cache = self.mir_cache.borrow_mut();
-                if let Some(mir) = mir_cache.get(&def_id) {
-                    return CachedMir::Owned(mir.clone());
-                }
+//     fn load_mir(&self, def_id: DefId) -> CachedMir<'a, 'tcx> {
+//         match self.tcx.map.as_local_node_id(def_id) {
+//             Some(node_id) => CachedMir::Ref(self.mir_map.map.get(&node_id).unwrap()),
+//             None => {
+//                 let mut mir_cache = self.mir_cache.borrow_mut();
+//                 if let Some(mir) = mir_cache.get(&def_id) {
+//                     return CachedMir::Owned(mir.clone());
+//                 }
 
-                let cs = &self.tcx.sess.cstore;
-                let mir = cs.maybe_get_item_mir(self.tcx, def_id).unwrap_or_else(|| {
-                    panic!("no mir for {:?}", def_id);
-                });
-                let cached = Rc::new(mir);
-                mir_cache.insert(def_id, cached.clone());
-                CachedMir::Owned(cached)
-            }
-        }
-    }
-}
+//                 let cs = &self.tcx.sess.cstore;
+//                 let mir = cs.maybe_get_item_mir(self.tcx, def_id).unwrap_or_else(|| {
+//                     panic!("no mir for {:?}", def_id);
+//                 });
+//                 let cached = Rc::new(mir);
+//                 mir_cache.insert(def_id, cached.clone());
+//                 CachedMir::Owned(cached)
+//             }
+//         }
+//     }
+// }
 
 pub fn interpret<'a, 'tcx>(
-        program: &'a Program<'a>,
+        program: &'a mut Program<'a, 'tcx>,
         main: DefId,
         tcx: TyCtxt<'a, 'tcx, 'tcx>,
         map: &MirMap<'tcx>
@@ -533,9 +536,9 @@ pub fn interpret<'a, 'tcx>(
     // let node_id = tcx.map.as_local_node_id(main).unwrap();
     // let mir = map.map.get(&node_id).unwrap();
 
-    let loader = ModulesLoader::new(tcx, map);
-    loader.load_mir(main);
-    let mut interpreter = Interpreter::new(program, &loader);
+    // let loader = ModulesLoader::new(tcx, map);
+    // loader.load_mir(main);
+    let mut interpreter = Interpreter::new(program);
 
     interpreter.run(main);
 }

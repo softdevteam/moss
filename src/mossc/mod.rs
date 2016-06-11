@@ -28,8 +28,13 @@ use rustc::hir::def_id::DefId;
 
 use rustc::ty::{TyCtxt, AdtKind, VariantKind};
 
+use rustc_const_math::{Us32, Us64};
+
 use std::ops::{Deref, DerefMut};
 
+use std::rc::Rc;
+
+// use std::cell::RefCell;
 // use rustc_const_math::ConstInt;
 // use syntax::parse::token::InternedString;
 
@@ -38,34 +43,51 @@ pub mod interpret;
 pub type Function<'tcx> = Vec<OpCode<'tcx>>;
 
 // pub type KrateTree<'a> = BTreeMap<u32, BTreeMap<u32, Function<'a>>>;
-pub type KrateTree<'a> = BTreeMap<DefId, Function<'a>>;
+pub type KrateTree<'a> = BTreeMap<DefId, Rc<Function<'a>>>;
 //Program: krate_id -> node_id -> Function
 // pub type Program<'a> = BTreeMap<u32, BTreeMap<u32, Function<'a>>>;
 
-pub struct Program<'a> {
-    pub krates: KrateTree<'a>
+pub struct Program<'a, 'tcx: 'a> {
+    context: &'a Context<'a, 'tcx>,
+    pub krates: KrateTree<'a>,
+    krate_cache: Vec<Rc<Function<'a>>>
 }
 
-impl<'a> Program<'a> {
-    fn new() -> Program<'a> {
-        Program {krates: BTreeMap::new() }
+impl<'a, 'tcx> Program<'a, 'tcx> {
+    fn new(context: &'a Context<'a, 'tcx>) -> Program<'a, 'tcx> {
+        Program {context: context, krates: BTreeMap::new(), krate_cache: Vec::new() }
+    }
+
+    fn get_func<'b>(&'b mut self, def_id: DefId) -> Rc<Function<'a>> {
+        let context = &self.context;
+        let cache = &mut self.krate_cache;
+        self.krates.entry(def_id).or_insert_with(|| {
+            println!("load function {:?}", def_id);
+            let cs = &context.tcx.sess.cstore;
+            let mir = cs.maybe_get_item_mir(context.tcx, def_id).unwrap_or_else(||{
+                panic!("no mir for {:?}", def_id);
+            });
+            // let () = context.mir_to_bytecode(&mir);
+            cache.push(Rc::new(context.mir_to_bytecode(&mir)));
+            cache[0].clone()
+        }).clone()
     }
 }
 
-impl<'a> Deref for Program<'a> {
-    type Target = KrateTree<'a>;
+// impl<'a, 'tcx> Deref for Program<'a, 'tcx> {
+//     type Target = KrateTree<'a>;
 
-    fn deref(&self) -> &KrateTree<'a> {
-        &self.krates
-    }
-}
+//     fn deref(&self) -> &KrateTree<'a> {
+//         &self.krates
+//     }
+// }
 
-impl<'a> DerefMut for Program<'a> {
+// impl<'a, 'tcx> DerefMut for Program<'a, 'tcx> {
 
-    fn deref_mut<'b>(&'b mut self) -> &'b mut KrateTree<'a> {
-        &mut self.krates
-    }
-}
+//     fn deref_mut<'b>(&'b mut self) -> &'b mut KrateTree<'a> {
+//         &mut self.krates
+//     }
+// }
 
 #[derive(Debug, Clone)]
 pub enum Var {
@@ -393,18 +415,20 @@ impl<'a> BlockGen<'a> {
                     match struct_def.kind {
                         VariantKind::Struct => {
                             for field in struct_def.fields.iter() {
-                                println!("{:?}", field.name);
+                                println!("Struct {:?}", field.name);
                             }
                         },
                         VariantKind::Tuple => {
                             //doesn't really make sense at this point
                             //we can just use indicies
                             for field in struct_def.fields.iter() {
-                                println!("{:?}", field.name);
+                                println!("Tuple {:?}", field.name);
                             }
                         },
                         VariantKind::Unit => {},
                     }
+
+                    unimplemented!()
 
                 }
                 // println!("S: {:?}", size);
@@ -528,7 +552,10 @@ impl<'a> BlockGen<'a> {
                         I32(i) => OpCode::SignedInteger(i as i64),
                         I64(i) => OpCode::SignedInteger(i),
 
-                        _ => unimplemented!(),
+                        Usize(Us32(us32)) => OpCode::UnsignedInteger(us32 as u64),
+                        Usize(Us64(us64)) => OpCode::UnsignedInteger(us64 as u64),
+
+                        _ => panic!(format!("{:?}", boxed)),
                     }
                 } else if let ConstVal::Bool(b) = *value {
                     OpCode::Bool(b)
@@ -557,10 +584,10 @@ impl<'a> BlockGen<'a> {
 }
 
 
-pub fn generate_bytecode<'a, 'tcx>(context: &'a Context<'a, 'tcx>) -> (Program<'a>, DefId) {
+pub fn generate_bytecode<'a, 'tcx>(context: &'a Context<'a, 'tcx>) -> (Program<'a, 'tcx>, DefId) {
 
     //map krate num -> node id
-    let mut program = Program::new();
+    let mut program = Program::new(context);
     // let mut build_ins: BTreeMap<u32, BTreeMap<u32, &'a InternedString>> = BTreeMap::new();
     let mut main: Option<DefId> = None;
 
@@ -585,9 +612,8 @@ pub fn generate_bytecode<'a, 'tcx>(context: &'a Context<'a, 'tcx>) -> (Program<'
                     // has something to do with lifetimes (what else)
                     // build_ins.entry(def_index.krate).or_insert(BTreeMap::new()).insert(def_index.index.as_u32(), &item.name.as_str());
                 } else {
-                    // program.krates.entry(def_index.krate).or_insert(BTreeMap::new()).insert(def_index.index.as_u32(), blocks);
 
-                    program.krates.insert(def_index, blocks);
+                    program.krates.insert(def_index, Rc::new(blocks));
 
                     if def_index.krate == 0 && item.name.as_str() == "main" {
                         main = Some(def_index);
@@ -603,13 +629,11 @@ pub fn generate_bytecode<'a, 'tcx>(context: &'a Context<'a, 'tcx>) -> (Program<'
     // }
 
     for (func, block) in program.krates.iter() {
-        // for (func, block) in krate {
-            println!("Func {:?}", func);
-            for (i, opcode) in block.iter().enumerate() {
-                println!("{} {:?}",i, opcode);
-            }
-            println!("");
-        // }
+        println!("Func {:?}", func);
+        for (i, opcode) in block.iter().enumerate() {
+            println!("{} {:?}",i, opcode);
+        }
+        println!("");
     }
 
     (program, main.unwrap())
