@@ -30,8 +30,8 @@ impl<'a> CompilerCalls<'a> for MossCompilerCalls {
             let tcx = state.tcx.unwrap();
             let context = Context{tcx: tcx, map: &map};
 
-            let (mut program, main) = mossc::generate_bytecode(&context);
-            interpret::interpret(&mut program, main, tcx, map);
+            let (mut program, main, internal_funcs) = mossc::generate_bytecode(&context);
+            interpret::interpret(&mut program, main, tcx, map, &internal_funcs);
         });
 
         control.after_analysis.stop = Compilation::Stop;

@@ -49,27 +49,24 @@ pub type KrateTree<'a> = BTreeMap<DefId, Rc<Function<'a>>>;
 
 pub struct Program<'a, 'tcx: 'a> {
     context: &'a Context<'a, 'tcx>,
-    pub krates: KrateTree<'a>,
-    krate_cache: Vec<Rc<Function<'a>>>
+    pub krates: KrateTree<'a>
 }
 
 impl<'a, 'tcx> Program<'a, 'tcx> {
     fn new(context: &'a Context<'a, 'tcx>) -> Program<'a, 'tcx> {
-        Program {context: context, krates: BTreeMap::new(), krate_cache: Vec::new() }
+        Program {context: context, krates: BTreeMap::new() }
     }
 
     fn get_func<'b>(&'b mut self, def_id: DefId) -> Rc<Function<'a>> {
         let context = &self.context;
-        let cache = &mut self.krate_cache;
+
         self.krates.entry(def_id).or_insert_with(|| {
-            println!("load function {:?}", def_id);
+            // println!("load function {:?}", def_id);
             let cs = &context.tcx.sess.cstore;
             let mir = cs.maybe_get_item_mir(context.tcx, def_id).unwrap_or_else(||{
                 panic!("no mir for {:?}", def_id);
             });
-            // let () = context.mir_to_bytecode(&mir);
-            cache.push(Rc::new(context.mir_to_bytecode(&mir)));
-            cache[0].clone()
+            Rc::new(context.mir_to_bytecode(&mir))
         }).clone()
     }
 }
@@ -114,14 +111,18 @@ pub enum OpCode<'tcx>{
     Const(Constant<'tcx>),
     Static(DefId),
     LoadFunc(DefId),
-
+    Len,
+    AssignIndex,
     ArgCount(usize),
     Call,
 
     UnsignedInteger(u64),
+    Usize(usize),
     SignedInteger(i64),
     Float(f64),
     Bool(bool),
+
+    Repeat(usize),
 
     BORROW(BorrowKind),
 
@@ -174,7 +175,11 @@ impl<'a, 'tcx> Context<'a, 'tcx> {
 
     pub fn mir_to_bytecode(&'a self, func: &Mir<'a>) -> Function<'a> {
         let blocks = func.basic_blocks.iter().map(
-            |bb| BlockGen::analyse(bb)).collect();
+            |bb| {
+                let mut gen = BlockGen::new(self.tcx);
+                gen.analyse_block(bb);
+                gen.opcodes
+            }).collect();
 
         self.optimize_blocks(&blocks, func)
     }
@@ -266,20 +271,15 @@ impl<'a, 'tcx> Context<'a, 'tcx> {
 //     }
 // }
 
-struct BlockGen<'a>{
-    opcodes: Function<'a>
+struct BlockGen<'a, 'tcx: 'a>{
+    opcodes: Function<'a>,
+    tcx: TyCtxt<'a, 'tcx, 'tcx>
 }
 
-impl<'a> BlockGen<'a> {
-    fn analyse(block: &BasicBlockData<'a>) ->Function<'a> {
-        let mut this = Self::new();
-        this.analyse_block(block);
+impl<'a, 'tcx> BlockGen<'a, 'tcx> {
 
-        this.opcodes
-    }
-
-    fn new() -> Self {
-        BlockGen{ opcodes: Vec::new() }
+    fn new(tcx: TyCtxt<'a, 'tcx, 'tcx>) -> Self {
+        BlockGen{ opcodes: Vec::new(), tcx: tcx }
     }
 
     fn analyse_block(&mut self, block: &BasicBlockData<'a>) {
@@ -319,6 +319,18 @@ impl<'a> BlockGen<'a> {
                         OpCode::TUPLE_SET(index)
                     },
 
+                    // x[index] = z;
+                    ProjectionElem::Index(ref index) => {
+                        //index
+                        self.rvalue_operand(index);
+
+                        //x
+                        let opcode = self.load_lvalue(&proj.base);
+                        self.opcodes.push(opcode);
+
+                        OpCode::AssignIndex
+                    },
+
                     _ => OpCode::TODO_S(format!("assign projection {:?}", proj.elem)),
                 }
                 // proj.base: Lvalue
@@ -337,6 +349,7 @@ impl<'a> BlockGen<'a> {
     }
 
     fn analyse_terminator(&mut self, terminator: &Terminator<'a>) {
+
         let op = match terminator.kind {
             TerminatorKind::Goto{target} => OpCode::_Goto(target),
             TerminatorKind::If{ref cond, targets: (ref bb1, ref bb2)} => {
@@ -348,6 +361,7 @@ impl<'a> BlockGen<'a> {
             TerminatorKind::Resume => OpCode::RESUME,
 
             TerminatorKind::Call{ref func, ref args, ref destination, ..} => {
+
                 // self.opcodes.push(OpCode::TODO("Load Args"));
                 for arg in args {
                     self.rvalue_operand(arg);
@@ -355,11 +369,18 @@ impl<'a> BlockGen<'a> {
                 self.opcodes.push(OpCode::ArgCount(args.len()));
 
                 self.rvalue_operand(func);
-                let destination = destination.as_ref().unwrap();
+
+                match destination.as_ref() {
+                    Some(dest) => {
+                        self.opcodes.push(OpCode::Call);
+                        self.assign_to(&dest.0);
+                        OpCode::_Goto(dest.1)
+                    },
+                    None => {
+                        OpCode::TODO("NO RETURN")
+                    }
+                }
                 // println!("{:?}", destination.0);
-                self.opcodes.push(OpCode::Call);
-                self.assign_to(&destination.0);
-                OpCode::_Goto(destination.1)
                 // OpCode::Call()
                 // OpCode::TODO("CALL")
             },
@@ -369,6 +390,7 @@ impl<'a> BlockGen<'a> {
                 self.opcodes.push(opcode);
                 OpCode::TODO("Drop")
             },
+
             _ => OpCode::TODO("Terminator"),
         };
         self.opcodes.push(op);
@@ -395,6 +417,10 @@ impl<'a> BlockGen<'a> {
                 }
             },
             Rvalue::Aggregate(AggregateKind::Vec, ref vec) => {
+                println!("{:?}", vec);
+                for value in vec {
+                    self.rvalue_operand(value);
+                }
                 self.opcodes.push(OpCode::VEC(vec.len()));
             },
             Rvalue::Aggregate(AggregateKind::Adt(adt_def, _size, _subst), ref operands) => {
@@ -406,37 +432,22 @@ impl<'a> BlockGen<'a> {
                     Variants are either VariantKind::{Struct, Tuple, Unit}
                 */
 
-                for operand in operands.iter() {
-                    self.rvalue_operand(operand)
-                }
-
                 if adt_def.adt_kind() == AdtKind::Struct {
+                    // the struct definition is the first variant
                     let ref struct_def = adt_def.variants[0];
-                    match struct_def.kind {
-                        VariantKind::Struct => {
-                            for field in struct_def.fields.iter() {
-                                println!("Struct {:?}", field.name);
-                            }
-                        },
-                        VariantKind::Tuple => {
-                            //doesn't really make sense at this point
-                            //we can just use indicies
-                            for field in struct_def.fields.iter() {
-                                println!("Tuple {:?}", field.name);
-                            }
-                        },
-                        VariantKind::Unit => {},
+                    self.opcodes.push(OpCode::TUPLE(struct_def.fields.len()));
+                    for (i, operand) in operands.iter().enumerate() {
+                        self.rvalue_operand(operand);
+                        self.opcodes.push(OpCode::TUPLE_ASSIGN(i));
                     }
-
-                    unimplemented!()
-
+                    // self.opcodes.push(OpCode::)
                 }
                 // println!("S: {:?}", size);
                 // for var in adt_def.variants.iter() {
                     // println!("X: {:?}", var.name);
                 // }
                 // println!("{:?}", adt_def.variants.iter().map(|var| var.name).collect());
-                self.opcodes.push(OpCode::TODO("Aggr Adt"));
+                // self.opcodes.push(OpCode::TODO("Aggr Adt"));
             },
             Rvalue::Aggregate(AggregateKind::Closure(_def_id, _subst), ref _aggr) => {
                 self.opcodes.push(OpCode::TODO("Aggr Closure"));
@@ -447,6 +458,22 @@ impl<'a> BlockGen<'a> {
                 self.opcodes.push(opcode);
                 self.opcodes.push(OpCode::BORROW(*kind));
             },
+
+            // example: [0; 5] -> [0, 0, 0, 0, 0]
+            Rvalue::Repeat(ref op, ref times) => {
+                let size = times.value.as_u64(self.tcx.sess.target.uint_type);
+                self.rvalue_operand(op);
+                self.opcodes.push(OpCode::Repeat(size as usize));
+            },
+
+            Rvalue::Len(ref lvalue) => {
+                println!("{:?}", lvalue);
+                let op = self.load_lvalue(lvalue);
+                self.opcodes.push(op);
+
+                self.opcodes.push(OpCode::Len);
+            },
+
             _ => {self.opcodes.push(OpCode::TODO("Rvalue"))},
         }
     }
@@ -552,8 +579,8 @@ impl<'a> BlockGen<'a> {
                         I32(i) => OpCode::SignedInteger(i as i64),
                         I64(i) => OpCode::SignedInteger(i),
 
-                        Usize(Us32(us32)) => OpCode::UnsignedInteger(us32 as u64),
-                        Usize(Us64(us64)) => OpCode::UnsignedInteger(us64 as u64),
+                        Usize(Us32(us32)) => OpCode::Usize(us32 as usize),
+                        Usize(Us64(us64)) => OpCode::Usize(us64 as usize),
 
                         _ => panic!(format!("{:?}", boxed)),
                     }
@@ -568,8 +595,9 @@ impl<'a> BlockGen<'a> {
                 // println!("{:?}", def_id);
                 unimplemented!()
             },
-            Literal::Promoted{index: _} => {
-                unimplemented!()
+            Literal::Promoted{index} => {
+                // OpCode::UnsignedInteger
+                OpCode::Usize(index)
             },
         }
     }
@@ -584,12 +612,14 @@ impl<'a> BlockGen<'a> {
 }
 
 
-pub fn generate_bytecode<'a, 'tcx>(context: &'a Context<'a, 'tcx>) -> (Program<'a, 'tcx>, DefId) {
+pub fn generate_bytecode<'a, 'tcx>(context: &'a Context<'a, 'tcx>) -> (Program<'a, 'tcx>, DefId, BTreeMap<DefId, String>) {
 
     //map krate num -> node id
     let mut program = Program::new(context);
     // let mut build_ins: BTreeMap<u32, BTreeMap<u32, &'a InternedString>> = BTreeMap::new();
     let mut main: Option<DefId> = None;
+
+    let mut internals= BTreeMap::new();
 
     for (key, func_mir) in &context.map.map {
         // let mir = map.map.get(key).unwrap();
@@ -604,20 +634,16 @@ pub fn generate_bytecode<'a, 'tcx>(context: &'a Context<'a, 'tcx>) -> (Program<'
                 //     // println!("{} {:?}", i, block);
                 // }
                 // let blocks = optimize_blocks(&collector.blocks, func_mir);
+
                 let blocks: Function = context.mir_to_bytecode(func_mir);
 
+                program.krates.insert(def_index, Rc::new(blocks));
+
                 if item.name.as_str().starts_with("__") {
-                    // TODO
-                    // figure out how to use internedstring here.
-                    // has something to do with lifetimes (what else)
-                    // build_ins.entry(def_index.krate).or_insert(BTreeMap::new()).insert(def_index.index.as_u32(), &item.name.as_str());
-                } else {
-
-                    program.krates.insert(def_index, Rc::new(blocks));
-
-                    if def_index.krate == 0 && item.name.as_str() == "main" {
-                        main = Some(def_index);
-                    }
+                    let s = item.name.as_str()[2..].to_string();
+                    internals.insert(def_index, s);
+                } else if def_index.krate == 0 && item.name.as_str() == "main" {
+                    main = Some(def_index);
                 }
         }
         // println!("{:?}", keys);
@@ -628,6 +654,7 @@ pub fn generate_bytecode<'a, 'tcx>(context: &'a Context<'a, 'tcx>) -> (Program<'
     //     println!("Node ID: {:?}", id);
     // }
 
+    // print out bytecode
     for (func, block) in program.krates.iter() {
         println!("Func {:?}", func);
         for (i, opcode) in block.iter().enumerate() {
@@ -636,5 +663,5 @@ pub fn generate_bytecode<'a, 'tcx>(context: &'a Context<'a, 'tcx>) -> (Program<'
         println!("");
     }
 
-    (program, main.unwrap())
+    (program, main.unwrap(), internals)
 }

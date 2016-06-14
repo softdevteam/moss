@@ -15,6 +15,8 @@ use mossc::{Program, Function, OpCode};
 
 use std::ops::{Deref};
 
+use std::collections::BTreeMap;
+
 
 //XXX: Is it better to store Tuple/NamedTuple struct on the stack or
 // should we rather use references to them to keep the theme of 64 bit values.
@@ -90,13 +92,24 @@ pub enum WrappedValue {
     StackReference(usize),
     I64(i64),
     U64(u64),
+    Usize(usize),
     Bool(bool),
     Address(Address),
     Tuple(WrappedTuple),
+    Array(Vec<WrappedValue>),
     // NamedTuple(W_NamedTuple<'a, 'tcx>),
     // Function(&'a Function<'tcx>),
 }
 
+impl WrappedValue {
+    fn unwrap_usize(&self) -> usize {
+        if let WrappedValue::Usize(size) = *self {
+            size
+        } else {
+            panic!("expected Usize got {:?}", self);
+        }
+    }
+}
 
 // TODO: implement getter and setter for tuple
 #[derive(Clone, Debug)]
@@ -115,6 +128,19 @@ impl WrappedTuple {
     }
 }
 
+
+// // [1, 2, 3]
+// struct WrappedArray {
+//     size: usize,
+//     data: Vec<WrappedValue>
+// }
+
+// impl WrappedArray {
+//     fn with_size(size: usize) -> Self {
+//         WrappedArray { size: size, data: Vec::with_capacity(size) }
+//     }
+// }
+
 // #[derive(Clone, Debug)]
 // struct W_NamedTuple<'a, 'tcx:'a> {
 //     data: &'a BTreeMap<&'a str, WrappedValue<'a, 'tcx>>,
@@ -122,6 +148,7 @@ impl WrappedTuple {
 
 struct Interpreter<'p, 'a: 'p, 'cx: 'a> {
     program: &'p mut Program<'a, 'cx>,
+    internals_map: &'p BTreeMap<DefId, String>,
     // loader: &'a ModulesLoader<'a, 'cx>,
 
     w_stack: WStack,
@@ -134,9 +161,10 @@ type Stack = Vec<StackData>;
 type WStack = Vec<WrappedValue>;
 
 impl<'p, 'a, 'cx> Interpreter<'p, 'a, 'cx> {
-    fn new(program: &'p mut Program<'a, 'cx>) -> Self {
+    fn new(program: &'p mut Program<'a, 'cx>, internals_map: &'p BTreeMap<DefId, String>) -> Self {
         Interpreter {
             program: program,
+            internals_map: internals_map,
             stack: Stack::new(),
             w_stack: WStack::new(),
             w_stack_pointer: 0
@@ -197,7 +225,6 @@ impl<'p, 'a, 'cx> Interpreter<'p, 'a, 'cx> {
         }
 
         if let Some(&StackData::ArgCount(n)) = self.stack.last() {
-            println!("D: {:?}", self.stack);
             self.stack.pop();
             for i in 0..n {
                 let something = self.stack.pop().unwrap();
@@ -210,7 +237,7 @@ impl<'p, 'a, 'cx> Interpreter<'p, 'a, 'cx> {
         loop {
 
             let opcode = &func[pc];
-            println!("Execute {:?}", opcode);
+            // println!("Execute {:?}", opcode);
             match *opcode {
                 OpCode::RETURN => {
                     break
@@ -235,6 +262,19 @@ impl<'p, 'a, 'cx> Interpreter<'p, 'a, 'cx> {
                     if let WrappedValue::Address(address) = wrapped_address {
                         if let Address::StaticFunc(def_id) = address {
 
+                            if let Some(func_name) = self.internals_map.get(&def_id) {
+                                match func_name.as_ref() {
+                                    "out" => {
+                                        let val = self.stack[self.stack.len()-2].unwrap_value();
+                                        println!("{:?}", val);
+                                    },
+                                    _ => unimplemented!()
+                                }
+                            }
+
+                            let func = self.program.get_func(def_id);
+                            self.eval_func(&func);
+
                             // let mir = self.loader.load_mir(defid);
 
                             // let mut fg = FuncGen::new(&self.loader.tcx, &self.loader.mir_map);
@@ -243,8 +283,6 @@ impl<'p, 'a, 'cx> Interpreter<'p, 'a, 'cx> {
                             // let krate = self.program.krates.get(&defid.krate).unwrap();
                             // let func = krate.get(&defid.index.as_u32()).unwrap();
                             // let func = self.program.get(&defid).unwrap();
-                            let func = self.program.get_func(def_id);
-                            self.eval_func(&func);
                         } else {
                             panic!("Expected func got {:?}", address);
                         }
@@ -277,16 +315,25 @@ impl<'p, 'a, 'cx> Interpreter<'p, 'a, 'cx> {
                 OpCode::TUPLE_GET(idx) => self.o_tuple_get(idx),
                 OpCode::TUPLE_SET(idx) => self.o_tuple_set(idx),
 
+                OpCode::VEC(n) => self.o_vec(n),
+                OpCode::Repeat(n) => self.o_repeat(n),
+
+                OpCode::AssignIndex => self.o_assign_index(),
+
+                OpCode::Len => self.o_len(),
+
                 OpCode::SignedInteger(n) => {
                     self.stack.push(StackData::Value(WrappedValue::I64(n)));
                 },
                 OpCode::UnsignedInteger(n) => {
                     self.stack.push(StackData::Value(WrappedValue::U64(n)));
                 },
+                OpCode::Usize(size) => {
+                    self.stack.push(StackData::Value(WrappedValue::Usize(size)));
+                },
                 OpCode::Bool(b) => {
                     self.stack.push(StackData::Value(WrappedValue::Bool(b)));
                 },
-
 
                 OpCode::StoreLocal(idx) => self.o_store_local(idx),
                 OpCode::LoadLocal(idx) => self.o_load_local(idx),
@@ -328,14 +375,72 @@ impl<'p, 'a, 'cx> Interpreter<'p, 'a, 'cx> {
                     }
                 },
 
+                OpCode::Use => {
+                    //XXX DO SOMETHING
+                },
+
                 _ => {
                     println!("TODO {:?}", opcode);
-                    // unimplemented!();
+                    unimplemented!();
                 },
             }
             pc += 1;
         }
+
         println!("\nLocals: {:?}", self.w_stack);
+    }
+
+    fn o_vec(&mut self, size: usize) {
+        let mut array: Vec<WrappedValue> = Vec::with_capacity(size);
+        for _ in 0..size {
+            array.push(WrappedValue::None)
+        }
+
+        for idx in (0..size).rev() {
+            let val = self.pop_stack_value();
+            array[idx] = val;
+        }
+        self.stack.push(StackData::Value(WrappedValue::Array(array)));
+    }
+
+    fn o_repeat(&mut self, size: usize) {
+        let mut array: Vec<WrappedValue> = Vec::with_capacity(size);
+        for _ in 0..size {
+            array.push(WrappedValue::None)
+        }
+
+        let val = self.pop_stack_value();
+        for idx in 0..size {
+            array[idx] = val.clone();
+        }
+
+        self.stack.push(StackData::Value(WrappedValue::Array(array)));
+    }
+
+    fn o_len(&mut self) {
+        let v = self.pop_stack_value();
+
+        if let WrappedValue::Array(ref array) = v {
+            self.stack.push(StackData::Value(WrappedValue::Usize(array.len())));
+        } else {
+            panic!("expected array got {:?}", v);
+        }
+    }
+
+    fn o_assign_index(&mut self) {
+        // println!("{:?}", wrapped_array);
+        let array_address = self.stack.pop().unwrap().unwrap_address();
+        let index = self.pop_stack_value().unwrap_usize();
+        let value = self.pop_stack_value();
+
+        match array_address {
+            Address::StackLocal(addr) => {
+                if let WrappedValue::Array(ref mut array) = self.w_stack[addr] {
+                    array[index] = value;
+                }
+            },
+            _ => unimplemented!(),
+        }
     }
 
     fn o_tuple(&mut self, size: usize) {
@@ -446,6 +551,7 @@ impl<'p, 'a, 'cx> Interpreter<'p, 'a, 'cx> {
         let val = StackData::Value(match(left, right) {
             (I64(l), I64(r)) => int_binops!(I64, l, r),
             (U64(l), U64(r)) => int_binops!(U64, l, r),
+            (Usize(l), Usize(r)) => int_binops!(Usize, l, r),
 
             // copied from miri
             (Bool(l), Bool(r)) => {
@@ -530,7 +636,8 @@ pub fn interpret<'a, 'tcx>(
         program: &'a mut Program<'a, 'tcx>,
         main: DefId,
         tcx: TyCtxt<'a, 'tcx, 'tcx>,
-        map: &MirMap<'tcx>
+        map: &MirMap<'tcx>,
+        internals: &BTreeMap<DefId, String>
         ){
 
     // let node_id = tcx.map.as_local_node_id(main).unwrap();
@@ -538,7 +645,7 @@ pub fn interpret<'a, 'tcx>(
 
     // let loader = ModulesLoader::new(tcx, map);
     // loader.load_mir(main);
-    let mut interpreter = Interpreter::new(program);
+    let mut interpreter = Interpreter::new(program, internals);
 
     interpreter.run(main);
 }
