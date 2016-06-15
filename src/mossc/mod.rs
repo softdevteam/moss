@@ -17,7 +17,7 @@ pub use rustc::mir::repr::{
     Lvalue, Rvalue,
     Statement, StatementKind, Terminator, TerminatorKind,
     ProjectionElem, AggregateKind,
-    Field
+    Field, CastKind
 };
 
 use rustc::mir::mir_map::MirMap;
@@ -113,6 +113,7 @@ pub enum OpCode<'tcx>{
     LoadFunc(DefId),
     Len,
     AssignIndex,
+    GetIndex,
     ArgCount(usize),
     Call,
 
@@ -417,7 +418,7 @@ impl<'a, 'tcx> BlockGen<'a, 'tcx> {
                 }
             },
             Rvalue::Aggregate(AggregateKind::Vec, ref vec) => {
-                println!("{:?}", vec);
+                // println!("{:?}", vec);
                 for value in vec {
                     self.rvalue_operand(value);
                 }
@@ -467,14 +468,28 @@ impl<'a, 'tcx> BlockGen<'a, 'tcx> {
             },
 
             Rvalue::Len(ref lvalue) => {
-                println!("{:?}", lvalue);
+                // println!("{:?}", lvalue);
                 let op = self.load_lvalue(lvalue);
                 self.opcodes.push(op);
 
                 self.opcodes.push(OpCode::Len);
             },
 
-            _ => {self.opcodes.push(OpCode::TODO("Rvalue"))},
+            Rvalue::Cast(ref kind, ref operand, ref ty) => {
+               match *kind {
+                    CastKind::Unsize => {
+                        // println!("unsize {:?} to {:?}", operand, ty);
+
+                        self.opcodes.push(OpCode::TODO("UNSIZE"));
+                    },
+                    _ => unimplemented!(),
+               }
+            },
+
+            _ => {
+                println!("TODO-rvalue: {:?}", rvalue);
+                self.opcodes.push(OpCode::TODO("Rvalue"))
+            },
         }
     }
 
@@ -554,6 +569,14 @@ impl<'a, 'tcx> BlockGen<'a, 'tcx> {
                         self.opcodes.push(opcode);
 
                         OpCode::TUPLE_GET(field.index())
+                    },
+                    ProjectionElem::Index(ref index) => {
+                        self.rvalue_operand(index);
+                                                //x
+                        let opcode = self.load_lvalue(&proj.base);
+                        self.opcodes.push(opcode);
+
+                        OpCode::GetIndex
                     },
                     _ => OpCode::TODO("Projection")
                 }
@@ -655,13 +678,13 @@ pub fn generate_bytecode<'a, 'tcx>(context: &'a Context<'a, 'tcx>) -> (Program<'
     // }
 
     // print out bytecode
-    for (func, block) in program.krates.iter() {
-        println!("Func {:?}", func);
-        for (i, opcode) in block.iter().enumerate() {
-            println!("{} {:?}",i, opcode);
-        }
-        println!("");
-    }
+    // for (func, block) in program.krates.iter() {
+    //     println!("Func {:?}", func);
+    //     for (i, opcode) in block.iter().enumerate() {
+    //         println!("{} {:?}",i, opcode);
+    //     }
+    //     println!("");
+    // }
 
     (program, main.unwrap(), internals)
 }

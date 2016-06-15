@@ -109,6 +109,14 @@ impl WrappedValue {
             panic!("expected Usize got {:?}", self);
         }
     }
+
+    fn unwrap_tuple(&mut self) -> &mut WrappedTuple {
+        if let WrappedValue::Tuple(ref mut tuple) = *self {
+            tuple
+        } else {
+            panic!("expected Tuple, got {:?}", self);
+        }
+    }
 }
 
 // TODO: implement getter and setter for tuple
@@ -195,7 +203,7 @@ impl<'p, 'a, 'cx> Interpreter<'p, 'a, 'cx> {
         // }
     // }
 
-    fn to_value(&self, data: &StackData) -> WrappedValue {
+    fn to_value(&mut self, data: &StackData) -> WrappedValue {
         match data {
             &StackData::Value(ref v) => v.clone(),
             &StackData::Pointer(Address::StackLocal(ref other)) => {
@@ -204,6 +212,10 @@ impl<'p, 'a, 'cx> Interpreter<'p, 'a, 'cx> {
             &StackData::Pointer(Address::StaticFunc(ref def_id)) => {
                 WrappedValue::Address(Address::StaticFunc(def_id.clone()))
             },
+            &StackData::Pointer(Address::StackComplex(a, b)) => {
+                let tuple = self.w_stack[a].unwrap_tuple();
+                tuple.data[b].clone()
+            }
             _ => panic!("should not load interpreter level object {:?}", data)
         }
     }
@@ -265,8 +277,11 @@ impl<'p, 'a, 'cx> Interpreter<'p, 'a, 'cx> {
                             if let Some(func_name) = self.internals_map.get(&def_id) {
                                 match func_name.as_ref() {
                                     "out" => {
-                                        let val = self.stack[self.stack.len()-2].unwrap_value();
-                                        println!("{:?}", val);
+                                        let data = self.stack[self.stack.len()-2].clone();
+                                        let val = self.to_value(&data);
+                                        if let WrappedValue::Usize(n) = val {
+                                            print!("{}", n as u8 as char);
+                                        }
                                     },
                                     _ => unimplemented!()
                                 }
@@ -319,6 +334,7 @@ impl<'p, 'a, 'cx> Interpreter<'p, 'a, 'cx> {
                 OpCode::Repeat(n) => self.o_repeat(n),
 
                 OpCode::AssignIndex => self.o_assign_index(),
+                OpCode::GetIndex => self.o_get_index(),
 
                 OpCode::Len => self.o_len(),
 
@@ -387,7 +403,7 @@ impl<'p, 'a, 'cx> Interpreter<'p, 'a, 'cx> {
             pc += 1;
         }
 
-        println!("\nLocals: {:?}", self.w_stack);
+        // println!("\nLocals: {:?}", self.w_stack);
     }
 
     fn o_vec(&mut self, size: usize) {
@@ -427,20 +443,48 @@ impl<'p, 'a, 'cx> Interpreter<'p, 'a, 'cx> {
         }
     }
 
+    fn o_get_index(&mut self) {
+        let array_address = self.stack.pop().unwrap().unwrap_address();
+        let index = self.pop_stack_value().unwrap_usize();
+
+        let object = match array_address {
+            Address::StackLocal(addr) => {
+                &self.w_stack[addr]
+            },
+            Address::StackComplex(a, b) => {
+                &self.w_stack[a].unwrap_tuple().data[b]
+            },
+            _ => unimplemented!(),
+        };
+
+        if let WrappedValue::Array(ref array) = *object {
+            //XXX clone
+            let val = array[index].clone();
+            self.stack.push(StackData::Value(val));
+        }
+    }
+
     fn o_assign_index(&mut self) {
-        // println!("{:?}", wrapped_array);
         let array_address = self.stack.pop().unwrap().unwrap_address();
         let index = self.pop_stack_value().unwrap_usize();
         let value = self.pop_stack_value();
 
-        match array_address {
+        let mut obj = match array_address {
             Address::StackLocal(addr) => {
-                if let WrappedValue::Array(ref mut array) = self.w_stack[addr] {
-                    array[index] = value;
-                }
+                &mut self.w_stack[addr]
             },
+            Address::StackComplex(a, b) => {
+                &mut self.w_stack[a].unwrap_tuple().data[b]
+            }
             _ => unimplemented!(),
+        };
+
+        if let WrappedValue::Array(ref mut array) = *obj {
+            array[index] = value;
+        } else {
+            unimplemented!()
         }
+
     }
 
     fn o_tuple(&mut self, size: usize) {
@@ -479,14 +523,22 @@ impl<'p, 'a, 'cx> Interpreter<'p, 'a, 'cx> {
     }
 
     fn o_tuple_get(&mut self, idx: usize) {
-        let s_tuple = self.pop_stack_value();
-        if let WrappedValue::Tuple(ref wrapped_tuple) = s_tuple {
-            //XXX: do we have to consider move semantics here?
-            let value = wrapped_tuple.data[idx].clone();
-            self.stack.push(StackData::Value(value));
-        } else {
-            panic!("Expected tuple found {:?}", s_tuple);
+        // let s_tuple = self.pop_stack_value();
+        match self.stack.pop().unwrap().unwrap_address() {
+            Address::StackLocal(tuple_address) => {
+                self.stack.push(StackData::Pointer(
+                    Address::StackComplex(tuple_address, idx)));
+            },
+            _ => unimplemented!(),
         }
+        // if let WrappedValue::Tuple(ref _wrapped_tuple) = s_tuple {
+            //XXX: do we have to consider move semantics here?
+            // let value = wrapped_tuple.data[idx].clone();
+            // self.stack.push(StackData::Value(value));
+        // } else {
+            // panic!("Expected tuple found {:?}", s_tuple);
+        // }
+
     }
 
     fn o_store_local(&mut self, idx: usize) {
@@ -500,6 +552,11 @@ impl<'p, 'a, 'cx> Interpreter<'p, 'a, 'cx> {
             StackData::Pointer(Address::StaticFunc(defid)) => {
                 WrappedValue::Address(Address::StaticFunc(defid))
             },
+            StackData::Pointer(Address::StackComplex(a, b)) => {
+                let tuple = self.w_stack[a].unwrap_tuple();
+                tuple.data[b].clone()
+            },
+
             _ => panic!("should not store interpreter level object {:?}", v)
         };
 
