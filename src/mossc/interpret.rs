@@ -11,12 +11,14 @@ use rustc::ty::TyCtxt;
 use rustc::util::nodemap::DefIdMap;
 
 
-use mossc::{Program, Function, OpCode};
+use mossc::{Program, Function, OpCode, Guard};
 
 use std::ops::{Deref};
 
 use std::collections::BTreeMap;
 
+
+const HOT_LOOP: usize = 5;
 
 //XXX: Is it better to store Tuple/NamedTuple struct on the stack or
 // should we rather use references to them to keep the theme of 64 bit values.
@@ -197,6 +199,9 @@ impl<'p, 'a, 'cx> Interpreter<'p, 'a, 'cx> {
     fn run(&mut self, main: DefId) {
         let main_func = self.program.get_func(main);
         self.eval_func(main_func);
+
+        println!("{} traces generated", self.traces.len());
+        println!("{:?}", self.traces);
     }
 
     // fn deref(&mut self, address: Address) -> WrappedValue {
@@ -228,150 +233,156 @@ impl<'p, 'a, 'cx> Interpreter<'p, 'a, 'cx> {
         self.to_value(&something)
     }
 
-    fn eval_trace(&mut self, pc: usize) {
+    fn eval_trace(&mut self, pc: usize) -> Option<Guard<'a>> {
         let trace = self.traces.get(&pc).unwrap().clone();
 
         let mut frame_size = None;
+        loop {
+            for opcode in &*trace {
+                // println!("Trace Execute {:?} | SP {}", opcode, self.w_stack_pointer);
+                match *opcode {
+                    OpCode::Guard(ref guard) => {
+                        let failed = self.o_guard(guard);
+                        if failed {
+                            return Some(guard.clone());
+                        }
+                    },
 
-        for opcode in &*trace {
-            // println!("Trace Execute {:?} | SP {}", opcode, self.w_stack_pointer);
-            match *opcode {
-                OpCode::Guard(b) => self.o_guard(b),
+                    OpCode::Debug(in_pc) => {},
 
-                OpCode::Debug(in_pc) => {},
+                    OpCode::StackFrame(stack_size) => {
+                        self.o_stackframe(stack_size);
+                        frame_size = Some(stack_size);
+                    },
 
-                OpCode::StackFrame(stack_size) => {
-                    self.o_stackframe(stack_size);
-                    frame_size = Some(stack_size);
-                },
+                    OpCode::Use => {},
 
-                OpCode::Use => {},
+                    OpCode::Call => {
+                        self.w_stack_pointer_stack.push(self.w_stack_pointer);
+                        self.w_stack_pointer += frame_size.unwrap();
 
-                OpCode::Call => {
-                    self.w_stack_pointer_stack.push(self.w_stack_pointer);
-                    self.w_stack_pointer += frame_size.unwrap();
+                        let wrapped_address = self.pop_stack_value();
+                        if let WrappedValue::Address(address) = wrapped_address {
+                            if let Address::StaticFunc(def_id) = address {
 
-                    let wrapped_address = self.pop_stack_value();
-                    if let WrappedValue::Address(address) = wrapped_address {
-                        if let Address::StaticFunc(def_id) = address {
+                                if let Some(func_name) = self.internals_map.get(&def_id) {
+                                    match func_name.as_ref() {
+                                        "out" => {
+                                            let data = self.stack[self.stack.len()-2].clone();
+                                            let val = self.to_value(&data);
+                                            if let WrappedValue::Usize(n) = val {
+                                                // print!("{}", n as u8 as char);
+                                                println!("BF: {}", n);
+                                            }
+                                        },
+                                        "print" => {
+                                            let data = self.stack[self.stack.len()-2].clone();
+                                            let val = self.to_value(&data);
+                                            if let WrappedValue::Usize(n) = val {
+                                                print!("{}", n as u8 as char);
+                                            }
+                                        },
 
-                            if let Some(func_name) = self.internals_map.get(&def_id) {
-                                match func_name.as_ref() {
-                                    "out" => {
-                                        let data = self.stack[self.stack.len()-2].clone();
-                                        let val = self.to_value(&data);
-                                        if let WrappedValue::Usize(n) = val {
-                                            // print!("{}", n as u8 as char);
-                                            print!("BF: {}", n);
-                                        }
-                                    },
-                                    "print" => {
-                                        let data = self.stack[self.stack.len()-2].clone();
-                                        let val = self.to_value(&data);
-                                        if let WrappedValue::Usize(n) = val {
-                                            // print!("{}", n as u8 as char);
-                                            print!("{}", n as u8 as char);
-                                        }
-                                    },
-
-                                    _ => {}
-                                };
+                                        _ => {}
+                                    };
+                                }
                             }
                         }
-                    }
-                },
+                    },
 
-                OpCode::ArgCount(size) => {
-                    self.stack.push(StackData::ArgCount(size));
-                },
+                    OpCode::ArgCount(size) => {
+                        self.stack.push(StackData::ArgCount(size));
+                    },
 
-                OpCode::LoadFunc(defid) => {
-                    self.stack.push(StackData::Pointer(Address::StaticFunc(defid)));
-                },
-
-
-                OpCode::RETURN => {
-                    // println!("{:?} {:?}", self.w_stack_pointer, stack_pointers);
-                    // let frame_size = stack_pointers.pop().unwrap();
-                    // self.w_stack_pointer -= frame_size;
-                    let old_size = self.w_stack_pointer;
-                    self.o_return();
-                    frame_size = Some(old_size - self.w_stack_pointer);
-                },
-
-                OpCode::RETURN_POINTER => {},
+                    OpCode::LoadFunc(defid) => {
+                        self.stack.push(StackData::Pointer(Address::StaticFunc(defid)));
+                    },
 
 
-                OpCode::TUPLE(n) => self.o_tuple(n),
-                OpCode::TUPLE_ASSIGN(idx) => self.o_tuple_assign(idx),
-                OpCode::TUPLE_GET(idx) => self.o_tuple_get(idx),
-                OpCode::TUPLE_SET(idx) => self.o_tuple_set(idx),
+                    OpCode::RETURN => {
+                        // println!("{:?} {:?}", self.w_stack_pointer, stack_pointers);
+                        // let frame_size = stack_pointers.pop().unwrap();
+                        // self.w_stack_pointer -= frame_size;
+                        let old_size = self.w_stack_pointer;
+                        self.o_return();
+                        frame_size = Some(old_size - self.w_stack_pointer);
+                    },
 
-                OpCode::VEC(n) => self.o_vec(n),
-                OpCode::Repeat(n) => self.o_repeat(n),
+                    OpCode::RETURN_POINTER => {},
 
-                OpCode::AssignIndex => self.o_assign_index(),
-                OpCode::GetIndex => self.o_get_index(),
 
-                OpCode::Len => self.o_len(),
+                    OpCode::TUPLE(n) => self.o_tuple(n),
+                    OpCode::TUPLE_ASSIGN(idx) => self.o_tuple_assign(idx),
+                    OpCode::TUPLE_GET(idx) => self.o_tuple_get(idx),
+                    OpCode::TUPLE_SET(idx) => self.o_tuple_set(idx),
 
-                OpCode::SignedInteger(n) => {
-                    self.stack.push(StackData::Value(WrappedValue::I64(n)));
-                },
-                OpCode::UnsignedInteger(n) => {
-                    self.stack.push(StackData::Value(WrappedValue::U64(n)));
-                },
-                OpCode::Usize(size) => {
-                    self.stack.push(StackData::Value(WrappedValue::Usize(size)));
-                },
-                OpCode::Bool(b) => {
-                    self.stack.push(StackData::Value(WrappedValue::Bool(b)));
-                },
+                    OpCode::VEC(n) => self.o_vec(n),
+                    OpCode::Repeat(n) => self.o_repeat(n),
 
-                OpCode::StoreLocal(idx) => self.o_store_local(idx),
-                OpCode::LoadLocal(idx) => self.o_load_local(idx),
-                OpCode::BINOP(op) => self.o_binop(op),
+                    OpCode::AssignIndex => self.o_assign_index(),
+                    OpCode::GetIndex => self.o_get_index(),
 
-                OpCode::BORROW(..) => {
-                    let address = self.stack.pop().unwrap().unwrap_address();
-                    self.stack.push(StackData::Value(
-                        WrappedValue::Address(address)))
-                },
+                    OpCode::Len => self.o_len(),
 
-                OpCode::DEREF => {
-                    let wrapped_target = self.pop_stack_value();
-                    if let WrappedValue::Address(target) = wrapped_target {
-                        match target {
-                            Address::StackLocal(_idx) => {
-                                self.stack.push(StackData::Pointer(target));
-                            },
-                            _ => unimplemented!()
-                        }
-                    }  else {
-                        panic!("can't resolve {:?}", wrapped_target);
-                    }
-                },
+                    OpCode::SignedInteger(n) => {
+                        self.stack.push(StackData::Value(WrappedValue::I64(n)));
+                    },
+                    OpCode::UnsignedInteger(n) => {
+                        self.stack.push(StackData::Value(WrappedValue::U64(n)));
+                    },
+                    OpCode::Usize(size) => {
+                        self.stack.push(StackData::Value(WrappedValue::Usize(size)));
+                    },
+                    OpCode::Bool(b) => {
+                        self.stack.push(StackData::Value(WrappedValue::Bool(b)));
+                    },
 
-                OpCode::DEREF_STORE => {
-                    let wrapped_target = self.pop_stack_value();
-                    let value = self.pop_stack_value();
+                    OpCode::StoreLocal(idx) => self.o_store_local(idx),
+                    OpCode::LoadLocal(idx) => self.o_load_local(idx),
+                    OpCode::BINOP(op) => self.o_binop(op),
 
-                    if let WrappedValue::Address(target) = wrapped_target {
-                        match target {
-                            Address::StackLocal(idx) => {
-                                self.w_stack[idx] = value;
+                    OpCode::BORROW(..) => {
+                        let address = self.stack.pop().unwrap().unwrap_address();
+                        self.stack.push(StackData::Value(
+                            WrappedValue::Address(address)))
+                    },
+
+                    OpCode::DEREF => {
+                        let wrapped_target = self.pop_stack_value();
+                        if let WrappedValue::Address(target) = wrapped_target {
+                            match target {
+                                Address::StackLocal(_idx) => {
+                                    self.stack.push(StackData::Pointer(target));
+                                },
+                                _ => unimplemented!()
                             }
-                            _ => unimplemented!()
+                        }  else {
+                            panic!("can't resolve {:?}", wrapped_target);
                         }
-                    } else {
-                        panic!("can't resolve {:?}", wrapped_target);
+                    },
+
+                    OpCode::DEREF_STORE => {
+                        let wrapped_target = self.pop_stack_value();
+                        let value = self.pop_stack_value();
+
+                        if let WrappedValue::Address(target) = wrapped_target {
+                            match target {
+                                Address::StackLocal(idx) => {
+                                    self.w_stack[idx] = value;
+                                }
+                                _ => unimplemented!()
+                            }
+                        } else {
+                            panic!("can't resolve {:?}", wrapped_target);
+                        }
+                    },
+                    _ => {
+                        println!("UNHANDLED {:?}", opcode);
                     }
-                },
-                _ => {
-                    println!("UNHANDLED {:?}", opcode);
                 }
             }
         }
+        None
     }
 
     //aquire space on the stack ahead of the current stack pointer
@@ -402,13 +413,15 @@ impl<'p, 'a, 'cx> Interpreter<'p, 'a, 'cx> {
         }
     }
 
-    fn o_guard(&mut self, expected: bool) {
+    fn o_guard(&mut self, guard: &Guard) -> bool {
         let data = self.pop_stack_value();
-        if let WrappedValue::Bool(bool) = data {
+        if let WrappedValue::Bool(b) = data {
             // println!("guard({}) == {}", expected, bool);
-            if expected != bool {
-                panic!("guard fail");
-            }
+            return b != guard.expected;
+            // if b != guard.expected {
+                // println!("recover to {:?}[{}]", guard.recovery, guard.pc);
+                // panic!("guard fail");
+            // }
         } else {
             panic!("expected bool, got {:?}", data);
         }
@@ -416,16 +429,17 @@ impl<'p, 'a, 'cx> Interpreter<'p, 'a, 'cx> {
 
     fn eval_func(&mut self, func: Rc<Function<'a>>) {
 
+        let mut func = func;
         let mut pc: usize = 0;
         let mut func_stacksize = None;
 
         loop {
 
-            let opcode = &func[pc];
+            let opcode = &func[pc].clone();
             // println!("{:?} [{}]", self.w_stack[self.w_stack_pointer], self.w_stack_pointer);
             // println!("[{}] --{:?}", self.w_stack.len(), self.w_stack_pointer, );
             // println!("");
-            // println!("Execute {:?}| SP {}", opcode, self.w_stack_pointer);
+            println!("Execute {:?}| SP {}", opcode, self.w_stack_pointer);
 
             if self.is_tracing {
                 match *opcode {
@@ -435,7 +449,12 @@ impl<'p, 'a, 'cx> Interpreter<'p, 'a, 'cx> {
                         let wrapped = self.stack.last().unwrap().clone();
                         let val = self.to_value(&wrapped);
                         if let WrappedValue::Bool(b) = val {
-                            self.active_trace.push(OpCode::Guard(b));
+                            self.active_trace.push(
+                                OpCode::Guard(Guard {
+                                    expected: b,
+                                    recovery: func.clone(),
+                                    pc: pc,
+                                }));
                         } else {
                             panic!("expected bool, got {:?}", val);
                         }
@@ -505,19 +524,27 @@ impl<'p, 'a, 'cx> Interpreter<'p, 'a, 'cx> {
                                         if let WrappedValue::Usize(in_pc) = val {
                                             // println!("met_merge_point {:?}", in_pc);
                                             if self.traces.contains_key(&in_pc) {
-                                                loop { self.eval_trace(in_pc); }
-                                                panic!("exited trace");
-                                                continue;
+                                                if let Some(guard) = self.eval_trace(in_pc) {
+                                                    func = guard.recovery;
+                                                    pc = guard.pc;
+                                                    self.stack.push(StackData::Value(WrappedValue::Bool(!guard.expected)));
+                                                    // println!("FAILED IN {:?}", func[pc]);
+                                                    continue;
+                                                }
                                             } else if !self.is_tracing {
-                                                let count = self.trace_counter.entry(in_pc).or_insert(0);
-                                                *count += 1;
+                                                let count = {
+                                                    let count = self.trace_counter.entry(in_pc).or_insert(0);
+                                                    *count += 1;
+                                                    *count
+                                                };
                                                 // println!("COUNT {:?} {}", in_pc, count);
-                                                if *count > 100 {
+                                                if count > HOT_LOOP {
+                                                    self.trace_counter.clear();
                                                     self.is_tracing = true;
                                                     self.loop_start = in_pc;
                                                 }
                                             } else {
-                                                self.active_trace.push(OpCode::Debug(in_pc));
+                                                // self.active_trace.push(OpCode::Debug(in_pc));
                                                 if in_pc == self.loop_start {
                                                     // println!("trace finished");
                                                     // println!("{:?}", self.active_trace);

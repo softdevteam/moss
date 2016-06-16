@@ -163,9 +163,16 @@ pub enum OpCode<'tcx>{
 
     StackFrame(usize),
 
-    Guard(bool),
+    Guard(Guard<'tcx>),
     Debug(usize),
 
+}
+
+#[derive(Clone, Debug)]
+pub struct Guard<'a> {
+    pub expected: bool,
+    pub recovery: Rc<Function<'a>>,
+    pub pc: usize,
 }
 
 
