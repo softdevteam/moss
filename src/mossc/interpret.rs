@@ -64,7 +64,7 @@ pub enum StackData {
 
     Value(WrappedValue),
 
-
+    Frame(usize),
     ArgCount(usize),
 }
 
@@ -154,14 +154,23 @@ impl WrappedTuple {
 //     data: &'a BTreeMap<&'a str, WrappedValue<'a, 'tcx>>,
 // }
 
+
+type Trace<'a> = Vec<OpCode<'a>>;
+
 struct Interpreter<'p, 'a: 'p, 'cx: 'a> {
     program: &'p mut Program<'a, 'cx>,
     internals_map: &'p BTreeMap<DefId, String>,
+    trace_counter: BTreeMap<usize, usize>,
+    is_tracing: bool,
+    loop_start: usize,
+    active_trace: Trace<'a>,
+    //map pc to traces
+    traces: BTreeMap<usize, Rc<Trace<'a>>>,
     // loader: &'a ModulesLoader<'a, 'cx>,
 
     w_stack: WStack,
     w_stack_pointer: usize,
-
+    w_stack_pointer_stack: Vec<usize>,
     stack: Stack,
 }
 
@@ -175,7 +184,13 @@ impl<'p, 'a, 'cx> Interpreter<'p, 'a, 'cx> {
             internals_map: internals_map,
             stack: Stack::new(),
             w_stack: WStack::new(),
-            w_stack_pointer: 0
+            w_stack_pointer: 0,
+            trace_counter: BTreeMap::new(),
+            is_tracing: false,
+            loop_start: 0,
+            active_trace: Vec::new(),
+            traces: BTreeMap::new(),
+            w_stack_pointer_stack: Vec::new(),
         }
     }
 
@@ -186,14 +201,7 @@ impl<'p, 'a, 'cx> Interpreter<'p, 'a, 'cx> {
 
     fn run(&mut self, main: DefId) {
         let main_func = self.program.get_func(main);
-        // {
-            // let main_func = self.program.get_func(main);
-        // }
-        // let main_func = self.program.get_func(main);
-
-
-
-        self.eval_func(&main_func);
+        self.eval_func(main_func);
     }
 
     // fn deref(&mut self, address: Address) -> WrappedValue {
@@ -225,50 +233,28 @@ impl<'p, 'a, 'cx> Interpreter<'p, 'a, 'cx> {
         self.to_value(&something)
     }
 
-    fn eval_func(&mut self, func: &Function) {
-        let func_stacksize = match func[0] {
-            OpCode::StackFrame(s) => s,
-            _ => panic!("{:?}", "Unexpected Opcode")
-        };
+    fn eval_trace(&mut self, pc: usize) {
+        let trace = self.traces.get(&pc).unwrap().clone();
 
-        // aquire space on the stack
-        for _ in self.w_stack.len() .. self.w_stack_pointer + func_stacksize {
-            self.w_stack.push(WrappedValue::None);
-        }
+        let mut frame_size = None;
 
-        if let Some(&StackData::ArgCount(n)) = self.stack.last() {
-            self.stack.pop();
-            for i in 0..n {
-                let something = self.stack.pop().unwrap();
-                let val = self.to_value(&something);
-
-                self.w_stack[self.w_stack_pointer + i] = val;
-            }
-        }
-        let mut pc: usize = 1;
-        loop {
-
-            let opcode = &func[pc];
-            // println!("Execute {:?}", opcode);
+        for opcode in &*trace {
+            // println!("Trace Execute {:?} | SP {}", opcode, self.w_stack_pointer);
             match *opcode {
-                OpCode::RETURN => {
-                    break
+                OpCode::Guard(b) => self.o_guard(b),
+
+                OpCode::Debug(in_pc) => {},
+
+                OpCode::StackFrame(stack_size) => {
+                    self.o_stackframe(stack_size);
+                    frame_size = Some(stack_size);
                 },
 
-                OpCode::RETURN_POINTER => {},
-
-                OpCode::LoadFunc(defid) => {
-                    // let krate = self.program.get(&defid.krate).unwrap();
-                    // let func = krate.get(&defid.index.as_u32()).unwrap();
-                    self.stack.push(StackData::Pointer(Address::StaticFunc(defid)));
-                },
-
-                OpCode::ArgCount(size) => {
-                    self.stack.push(StackData::ArgCount(size));
-                },
+                OpCode::Use => {},
 
                 OpCode::Call => {
-                    self.w_stack_pointer += func_stacksize;
+                    self.w_stack_pointer_stack.push(self.w_stack_pointer);
+                    self.w_stack_pointer += frame_size.unwrap();
 
                     let wrapped_address = self.pop_stack_value();
                     if let WrappedValue::Address(address) = wrapped_address {
@@ -280,7 +266,272 @@ impl<'p, 'a, 'cx> Interpreter<'p, 'a, 'cx> {
                                         let data = self.stack[self.stack.len()-2].clone();
                                         let val = self.to_value(&data);
                                         if let WrappedValue::Usize(n) = val {
+                                            // print!("{}", n as u8 as char);
+                                            print!("BF: {}", n);
+                                        }
+                                    },
+                                    "print" => {
+                                        let data = self.stack[self.stack.len()-2].clone();
+                                        let val = self.to_value(&data);
+                                        if let WrappedValue::Usize(n) = val {
+                                            // print!("{}", n as u8 as char);
                                             print!("{}", n as u8 as char);
+                                        }
+                                    },
+
+                                    _ => {}
+                                };
+                            }
+                        }
+                    }
+                },
+
+                OpCode::ArgCount(size) => {
+                    self.stack.push(StackData::ArgCount(size));
+                },
+
+                OpCode::LoadFunc(defid) => {
+                    self.stack.push(StackData::Pointer(Address::StaticFunc(defid)));
+                },
+
+
+                OpCode::RETURN => {
+                    // println!("{:?} {:?}", self.w_stack_pointer, stack_pointers);
+                    // let frame_size = stack_pointers.pop().unwrap();
+                    // self.w_stack_pointer -= frame_size;
+                    let old_size = self.w_stack_pointer;
+                    self.o_return();
+                    frame_size = Some(old_size - self.w_stack_pointer);
+                },
+
+                OpCode::RETURN_POINTER => {},
+
+
+                OpCode::TUPLE(n) => self.o_tuple(n),
+                OpCode::TUPLE_ASSIGN(idx) => self.o_tuple_assign(idx),
+                OpCode::TUPLE_GET(idx) => self.o_tuple_get(idx),
+                OpCode::TUPLE_SET(idx) => self.o_tuple_set(idx),
+
+                OpCode::VEC(n) => self.o_vec(n),
+                OpCode::Repeat(n) => self.o_repeat(n),
+
+                OpCode::AssignIndex => self.o_assign_index(),
+                OpCode::GetIndex => self.o_get_index(),
+
+                OpCode::Len => self.o_len(),
+
+                OpCode::SignedInteger(n) => {
+                    self.stack.push(StackData::Value(WrappedValue::I64(n)));
+                },
+                OpCode::UnsignedInteger(n) => {
+                    self.stack.push(StackData::Value(WrappedValue::U64(n)));
+                },
+                OpCode::Usize(size) => {
+                    self.stack.push(StackData::Value(WrappedValue::Usize(size)));
+                },
+                OpCode::Bool(b) => {
+                    self.stack.push(StackData::Value(WrappedValue::Bool(b)));
+                },
+
+                OpCode::StoreLocal(idx) => self.o_store_local(idx),
+                OpCode::LoadLocal(idx) => self.o_load_local(idx),
+                OpCode::BINOP(op) => self.o_binop(op),
+
+                OpCode::BORROW(..) => {
+                    let address = self.stack.pop().unwrap().unwrap_address();
+                    self.stack.push(StackData::Value(
+                        WrappedValue::Address(address)))
+                },
+
+                OpCode::DEREF => {
+                    let wrapped_target = self.pop_stack_value();
+                    if let WrappedValue::Address(target) = wrapped_target {
+                        match target {
+                            Address::StackLocal(_idx) => {
+                                self.stack.push(StackData::Pointer(target));
+                            },
+                            _ => unimplemented!()
+                        }
+                    }  else {
+                        panic!("can't resolve {:?}", wrapped_target);
+                    }
+                },
+
+                OpCode::DEREF_STORE => {
+                    let wrapped_target = self.pop_stack_value();
+                    let value = self.pop_stack_value();
+
+                    if let WrappedValue::Address(target) = wrapped_target {
+                        match target {
+                            Address::StackLocal(idx) => {
+                                self.w_stack[idx] = value;
+                            }
+                            _ => unimplemented!()
+                        }
+                    } else {
+                        panic!("can't resolve {:?}", wrapped_target);
+                    }
+                },
+                _ => {
+                    println!("UNHANDLED {:?}", opcode);
+                }
+            }
+        }
+    }
+
+    //aquire space on the stack ahead of the current stack pointer
+    fn o_stackframe(&mut self, func_stacksize: usize) {
+
+        // aquire space on the stack
+        for _ in self.w_stack.len() .. self.w_stack_pointer + func_stacksize {
+            self.w_stack.push(WrappedValue::None);
+        }
+
+        if let Some(&StackData::ArgCount(n)) = self.stack.last() {
+            self.stack.pop();
+            for i in 0..n {
+                let something = self.stack.pop().unwrap();
+                let val = self.to_value(&something);
+                self.w_stack[self.w_stack_pointer + i] = val;
+            }
+        } else {
+            // println!("expected ArgCount, got {:?}", self.stack.last());
+        }
+    }
+
+    fn o_return(&mut self) {
+        // can't return from main
+        if self.w_stack_pointer != 0 {
+            let old_pointer = self.w_stack_pointer_stack.pop().unwrap();
+            self.w_stack_pointer = old_pointer;
+        }
+    }
+
+    fn o_guard(&mut self, expected: bool) {
+        let data = self.pop_stack_value();
+        if let WrappedValue::Bool(bool) = data {
+            // println!("guard({}) == {}", expected, bool);
+            if expected != bool {
+                panic!("guard fail");
+            }
+        } else {
+            panic!("expected bool, got {:?}", data);
+        }
+    }
+
+    fn eval_func(&mut self, func: Rc<Function<'a>>) {
+
+        let mut pc: usize = 0;
+        let mut func_stacksize = None;
+
+        loop {
+
+            let opcode = &func[pc];
+            // println!("{:?} [{}]", self.w_stack[self.w_stack_pointer], self.w_stack_pointer);
+            // println!("[{}] --{:?}", self.w_stack.len(), self.w_stack_pointer, );
+            // println!("");
+            // println!("Execute {:?}| SP {}", opcode, self.w_stack_pointer);
+
+            if self.is_tracing {
+                match *opcode {
+                    OpCode::JUMP(..) | OpCode::JUMP_REL(..) => {},
+
+                    OpCode::JUMP_IF(..) | OpCode::JUMP_REL_IF(..) => {
+                        let wrapped = self.stack.last().unwrap().clone();
+                        let val = self.to_value(&wrapped);
+                        if let WrappedValue::Bool(b) = val {
+                            self.active_trace.push(OpCode::Guard(b));
+                        } else {
+                            panic!("expected bool, got {:?}", val);
+                        }
+                    },
+
+                    _ => {
+                        self.active_trace.push(opcode.clone());
+                    }
+                }
+            }
+
+            match *opcode {
+                OpCode::StackFrame(stack_size) => {
+                    func_stacksize = Some(stack_size);
+                    self.o_stackframe(stack_size);
+                },
+
+                OpCode::RETURN => {
+                    self.o_return();
+                    break
+                },
+
+                OpCode::RETURN_POINTER => {},
+
+                OpCode::LoadFunc(defid) => {
+                    self.stack.push(StackData::Pointer(Address::StaticFunc(defid)));
+                },
+
+                OpCode::ArgCount(size) => {
+                    self.stack.push(StackData::ArgCount(size));
+                },
+
+                OpCode::Call => {
+                    // self.w_stack_pointer += func_stacksize.unwrap();
+
+                    // mark frame on stack
+                    // self.stack.push(StackData::Frame(self.w_stack_pointer));
+                    self.w_stack_pointer_stack.push(self.w_stack_pointer);
+                    self.w_stack_pointer += func_stacksize.unwrap();
+
+                    let wrapped_address = self.pop_stack_value();
+                    if let WrappedValue::Address(address) = wrapped_address {
+                        if let Address::StaticFunc(def_id) = address {
+
+                            if let Some(func_name) = self.internals_map.get(&def_id) {
+                                match func_name.as_ref() {
+                                    "out" => {
+                                        let data = self.stack[self.stack.len()-2].clone();
+                                        let val = self.to_value(&data);
+                                        if let WrappedValue::Usize(n) = val {
+                                            // print!("{}", n as u8 as char);
+                                            println!("BF: {}", n);
+                                        }
+                                    },
+                                    "print" => {
+                                        let data = self.stack[self.stack.len()-2].clone();
+                                        let val = self.to_value(&data);
+                                        if let WrappedValue::Usize(n) = val {
+                                            // print!("{}", n as u8 as char);
+                                            print!("{}", n as u8 as char);
+                                        }
+                                    },
+                                    "met_merge_point" => {
+                                        let data = self.stack[self.stack.len()-2].clone();
+                                        let val = self.to_value(&data);
+
+                                        if let WrappedValue::Usize(in_pc) = val {
+                                            // println!("met_merge_point {:?}", in_pc);
+                                            if self.traces.contains_key(&in_pc) {
+                                                loop { self.eval_trace(in_pc); }
+                                                panic!("exited trace");
+                                                continue;
+                                            } else if !self.is_tracing {
+                                                let count = self.trace_counter.entry(in_pc).or_insert(0);
+                                                *count += 1;
+                                                // println!("COUNT {:?} {}", in_pc, count);
+                                                if *count > 100 {
+                                                    self.is_tracing = true;
+                                                    self.loop_start = in_pc;
+                                                }
+                                            } else {
+                                                self.active_trace.push(OpCode::Debug(in_pc));
+                                                if in_pc == self.loop_start {
+                                                    // println!("trace finished");
+                                                    // println!("{:?}", self.active_trace);
+                                                    self.is_tracing = false;
+                                                    self.traces.insert(in_pc, Rc::new(self.active_trace.clone()));
+                                                }
+                                            }
+                                        } else {
+                                            panic!("expected usize got {:?}", val);
                                         }
                                     },
                                     _ => unimplemented!()
@@ -288,7 +539,7 @@ impl<'p, 'a, 'cx> Interpreter<'p, 'a, 'cx> {
                             }
 
                             let func = self.program.get_func(def_id);
-                            self.eval_func(&func);
+                            self.eval_func(func);
 
                             // let mir = self.loader.load_mir(defid);
 
@@ -301,7 +552,6 @@ impl<'p, 'a, 'cx> Interpreter<'p, 'a, 'cx> {
                         } else {
                             panic!("Expected func got {:?}", address);
                         }
-                        self.w_stack_pointer -= func_stacksize;
                     } else {
                         panic!("excpected address got {:?}", wrapped_address);
                     }
@@ -564,9 +814,6 @@ impl<'p, 'a, 'cx> Interpreter<'p, 'a, 'cx> {
     }
 
     fn o_load_local(&mut self, idx: usize) {
-        // let val = &self.w_stack[self.w_stack_pointer + idx];
-        // clone the pointer to the old value
-        // self.stack.push(unwrap_value());
         self.stack.push(StackData::Pointer(Address::StackLocal(self.w_stack_pointer + idx)))
     }
 
@@ -628,7 +875,10 @@ impl<'p, 'a, 'cx> Interpreter<'p, 'a, 'cx> {
 
             },
 
-            _ => unimplemented!()
+            (l, r) => {
+                println!("{:?} {:?}", l, r);
+                unimplemented!();
+            }
         });
         self.stack.push(val);
 

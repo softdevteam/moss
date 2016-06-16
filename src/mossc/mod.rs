@@ -163,6 +163,9 @@ pub enum OpCode<'tcx>{
 
     StackFrame(usize),
 
+    Guard(bool),
+    Debug(usize),
+
 }
 
 
