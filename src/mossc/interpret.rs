@@ -194,11 +194,6 @@ impl<'p, 'a, 'cx> Interpreter<'p, 'a, 'cx> {
         }
     }
 
-    // fn load_func(&'cx mut self, defid: DefId) -> &'b Function {
-        // let krate = self.program.get(&defid.krate).unwrap();
-        // krate.get(&defid.index.as_u32()).unwrap()
-    // }
-
     fn run(&mut self, main: DefId) {
         let main_func = self.program.get_func(main);
         self.eval_func(main_func);
@@ -540,15 +535,6 @@ impl<'p, 'a, 'cx> Interpreter<'p, 'a, 'cx> {
 
                             let func = self.program.get_func(def_id);
                             self.eval_func(func);
-
-                            // let mir = self.loader.load_mir(defid);
-
-                            // let mut fg = FuncGen::new(&self.loader.tcx, &self.loader.mir_map);
-                            // fg.analyse(&*mir);
-
-                            // let krate = self.program.krates.get(&defid.krate).unwrap();
-                            // let func = krate.get(&defid.index.as_u32()).unwrap();
-                            // let func = self.program.get(&defid).unwrap();
                         } else {
                             panic!("Expected func got {:?}", address);
                         }
@@ -753,12 +739,6 @@ impl<'p, 'a, 'cx> Interpreter<'p, 'a, 'cx> {
             },
             _ => panic!("can not load tuple at {:?}", tuple_address),
         }
-
-        // if let WrappedValue::Tuple(ref mut tuple) =  *t {
-        //     tuple.data[idx] = value;
-        // } else {
-        //     panic!("Expected tuple found {:?}", wrapped_tuple);
-        // }
     }
 
     fn o_tuple_assign(&mut self, idx: usize) {
@@ -781,14 +761,6 @@ impl<'p, 'a, 'cx> Interpreter<'p, 'a, 'cx> {
             },
             _ => unimplemented!(),
         }
-        // if let WrappedValue::Tuple(ref _wrapped_tuple) = s_tuple {
-            //XXX: do we have to consider move semantics here?
-            // let value = wrapped_tuple.data[idx].clone();
-            // self.stack.push(StackData::Value(value));
-        // } else {
-            // panic!("Expected tuple found {:?}", s_tuple);
-        // }
-
     }
 
     fn o_store_local(&mut self, idx: usize) {
@@ -885,60 +857,6 @@ impl<'p, 'a, 'cx> Interpreter<'p, 'a, 'cx> {
     }
 }
 
-
-// #[derive(Clone)]
-// enum CachedMir<'mir, 'tcx: 'mir> {
-//     Ref(&'mir mir::Mir<'tcx>),
-//     Owned(Rc<mir::Mir<'tcx>>)
-// }
-
-// impl<'mir, 'tcx> Deref for CachedMir<'mir, 'tcx> {
-//     type Target = mir::Mir<'tcx>;
-
-//     fn deref(&self) -> &mir::Mir<'tcx> {
-//         match *self {
-//             CachedMir::Ref(ref mir) => mir,
-//             CachedMir::Owned(ref mir) => mir,
-//         }
-//     }
-// }
-
-// struct ModulesLoader<'a, 'tcx: 'a> {
-//     tcx: TyCtxt<'a, 'tcx, 'tcx>,
-//     mir_cache: RefCell<DefIdMap<Rc<mir::Mir<'tcx>>>>,
-//     mir_map: &'a MirMap<'tcx>,
-// }
-
-// impl<'a, 'tcx> ModulesLoader<'a, 'tcx> {
-//     fn new(tcx: TyCtxt<'a, 'tcx, 'tcx>, mir_map: &'a MirMap<'tcx>) -> Self {
-//         ModulesLoader {
-//             tcx: tcx,
-//             mir_map: mir_map,
-//             mir_cache: RefCell::new(DefIdMap())
-//         }
-//     }
-
-//     fn load_mir(&self, def_id: DefId) -> CachedMir<'a, 'tcx> {
-//         match self.tcx.map.as_local_node_id(def_id) {
-//             Some(node_id) => CachedMir::Ref(self.mir_map.map.get(&node_id).unwrap()),
-//             None => {
-//                 let mut mir_cache = self.mir_cache.borrow_mut();
-//                 if let Some(mir) = mir_cache.get(&def_id) {
-//                     return CachedMir::Owned(mir.clone());
-//                 }
-
-//                 let cs = &self.tcx.sess.cstore;
-//                 let mir = cs.maybe_get_item_mir(self.tcx, def_id).unwrap_or_else(|| {
-//                     panic!("no mir for {:?}", def_id);
-//                 });
-//                 let cached = Rc::new(mir);
-//                 mir_cache.insert(def_id, cached.clone());
-//                 CachedMir::Owned(cached)
-//             }
-//         }
-//     }
-// }
-
 pub fn interpret<'a, 'tcx>(
         program: &'a mut Program<'a, 'tcx>,
         main: DefId,
@@ -947,11 +865,6 @@ pub fn interpret<'a, 'tcx>(
         internals: &BTreeMap<DefId, String>
         ){
 
-    // let node_id = tcx.map.as_local_node_id(main).unwrap();
-    // let mir = map.map.get(&node_id).unwrap();
-
-    // let loader = ModulesLoader::new(tcx, map);
-    // loader.load_mir(main);
     let mut interpreter = Interpreter::new(program, internals);
 
     interpreter.run(main);
