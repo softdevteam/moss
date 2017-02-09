@@ -34,6 +34,9 @@ use std::ops::{Deref, DerefMut};
 
 use std::rc::Rc;
 
+use rustc_data_structures::indexed_vec::Idx;
+
+
 // use std::cell::RefCell;
 // use rustc_const_math::ConstInt;
 // use syntax::parse::token::InternedString;
@@ -96,9 +99,11 @@ pub enum Var {
 #[allow(non_camel_case_types)]
 #[derive(Debug, Clone)]
 pub enum OpCode<'tcx>{
+    Noop,
+
     // Assign to stack variable
-    Store(Var, u32),
-    Load(Var, u32),
+    Store(Var, usize),
+    Load(Var, usize),
 
     LoadLocal(usize),
     StoreLocal(usize),
@@ -131,6 +136,7 @@ pub enum OpCode<'tcx>{
     DEREF_STORE,
 
     BINOP(BinOp),
+    CBINOP(BinOp),
 
     RETURN_POINTER,
 
@@ -185,7 +191,7 @@ pub struct Context<'a, 'tcx: 'a> {
 impl<'a, 'tcx> Context<'a, 'tcx> {
 
     pub fn mir_to_bytecode(&'a self, func: &Mir<'a>) -> Function<'a> {
-        let blocks = func.basic_blocks.iter().map(
+        let blocks = func.basic_blocks().iter().map(
             |bb| {
                 let mut gen = BlockGen::new(self.tcx);
                 gen.analyse_block(bb);
@@ -301,15 +307,16 @@ impl<'a, 'tcx> BlockGen<'a, 'tcx> {
     }
 
     fn analyse_statement(&mut self, statement: &Statement<'a>) {
-        let StatementKind::Assign(ref lvalue, ref rvalue) = statement.kind;
-        self.handle_rvalue(rvalue);
-        self.assign_to(lvalue);
+        if let StatementKind::Assign(ref lvalue, ref rvalue) = statement.kind {
+            self.handle_rvalue(rvalue);
+            self.assign_to(lvalue);
+        }
     }
 
     fn assign_to(&mut self, lvalue: &Lvalue<'a>) {
         let opcode = match *lvalue {
-            Lvalue::Var(n)  => OpCode::Store(Var::Var, n),
-            Lvalue::Temp(n) => OpCode::Store(Var::Tmp, n),
+            Lvalue::Var(n)  => OpCode::Store(Var::Var, n.index()),
+            Lvalue::Temp(n) => OpCode::Store(Var::Tmp, n.index()),
             Lvalue::Arg(_n)  => unreachable!(),
             Lvalue::Static(..)  => OpCode::TODO("assign static"),
 
@@ -396,13 +403,31 @@ impl<'a, 'tcx> BlockGen<'a, 'tcx> {
                 // OpCode::TODO("CALL")
             },
 
-            TerminatorKind::Drop{value: ref lvalue, target: _, unwind: _} => {
+            TerminatorKind::Drop{location: ref lvalue, target: _, unwind: _} => {
                 let opcode = self.load_lvalue(lvalue);
                 self.opcodes.push(opcode);
                 OpCode::TODO("Drop")
             },
 
-            _ => OpCode::TODO("Terminator"),
+            TerminatorKind::Assert{ref cond, expected, msg: _, target, cleanup} => {
+                // cond.as_rvalue(env);
+                // env.add(OpCode::ConstValue(R_BoxedValue::Bool(expected)));
+                // env.add(OpCode::BinOp(BinOp::Eq));
+                // env.opcodes.push(MetaOpCode::GotoIf(target));
+
+                OpCode::_Goto(target)
+                // if let Some(bb) = cleanup {
+                    // OpCode::_Goto(bb)
+                // } else {
+                    // panic!("Titanic");
+                    // OpCode::Noop
+                // }
+            },
+
+            _ => {
+                println!("{:?}", terminator.kind);
+                OpCode::TODO("Terminator")
+            }
         };
         self.opcodes.push(op);
     }
@@ -414,6 +439,13 @@ impl<'a, 'tcx> BlockGen<'a, 'tcx> {
                 self.rvalue_operand(op);
                 self.opcodes.push(OpCode::Use)
             },
+
+            Rvalue::CheckedBinaryOp(op, ref left, ref right) => {
+                self.rvalue_operand(left);
+                self.rvalue_operand(right);
+                self.opcodes.push(OpCode::CBINOP(op));
+            },
+
             Rvalue::BinaryOp(op, ref left, ref right) => {
                 self.rvalue_operand(left);
                 self.rvalue_operand(right);
@@ -434,7 +466,7 @@ impl<'a, 'tcx> BlockGen<'a, 'tcx> {
                 }
                 self.opcodes.push(OpCode::VEC(vec.len()));
             },
-            Rvalue::Aggregate(AggregateKind::Adt(adt_def, _size, _subst), ref operands) => {
+            Rvalue::Aggregate(AggregateKind::Adt(adt_def, _size, _subst, _), ref operands) => {
                 /*
                     Adt (abstract data type) is an enum. Structs are enums with only one variant.
                     To check whether an adt is an enum or a struct one can use `.adt_kind`.
@@ -562,9 +594,9 @@ impl<'a, 'tcx> BlockGen<'a, 'tcx> {
 
     fn load_lvalue(&mut self, lvalue: &Lvalue<'a>) -> OpCode<'a> {
         match lvalue {
-            &Lvalue::Var(n) => OpCode::Load(Var::Var, n),
-            &Lvalue::Temp(n) => OpCode::Load(Var::Tmp, n),
-            &Lvalue::Arg(n) => OpCode::Load(Var::Arg, n),
+            &Lvalue::Var(n) => OpCode::Load(Var::Var, n.index()),
+            &Lvalue::Temp(n) => OpCode::Load(Var::Tmp, n.index()),
+            &Lvalue::Arg(n) => OpCode::Load(Var::Arg, n.index()),
             &Lvalue::Static(def_id) => OpCode::Static(def_id),
             &Lvalue::Projection(ref proj) => {
                 match proj.elem {
@@ -630,7 +662,7 @@ impl<'a, 'tcx> BlockGen<'a, 'tcx> {
             },
             Literal::Promoted{index} => {
                 // OpCode::UnsignedInteger
-                OpCode::Usize(index)
+                OpCode::Usize(index.index())
             },
         }
     }
@@ -654,12 +686,16 @@ pub fn generate_bytecode<'a, 'tcx>(context: &'a Context<'a, 'tcx>) -> (Program<'
 
     let mut internals= BTreeMap::new();
 
-    for (key, func_mir) in &context.map.map {
+    let keys = &context.map.map.keys();
+    for key in keys {
+    // for (key, func_mir) in  {
+        let func_mir = context.map.map.get(key).unwrap();
         // let mir = map.map.get(key).unwrap();
         // println!("{:?}", mir.id);
-        let def_index = context.tcx.map.local_def_id(*key);
+        // let def_index = context.tcx.map.local_def_id(*key);
+        let def_index = key.to_owned();
 
-        if let Node::NodeItem(item) = context.tcx.map.get(key.to_owned()) {
+        if let Some(Node::NodeItem(item)) = context.tcx.map.get_if_local(def_index) {
             // println!("Function: {:?} {:?}", item.name.as_str(), def_index.index.as_u32());
                 // let mut collector = FuncGen::new(&context.tcx, context.map);
                 // collector.analyse(&func_mir);

@@ -201,7 +201,7 @@ impl<'p, 'a, 'cx> Interpreter<'p, 'a, 'cx> {
         self.eval_func(main_func);
 
         println!("{} traces generated", self.traces.len());
-        println!("{:?}", self.traces);
+        // println!("{:?}", self.traces);
     }
 
     // fn deref(&mut self, address: Address) -> WrappedValue {
@@ -340,6 +340,7 @@ impl<'p, 'a, 'cx> Interpreter<'p, 'a, 'cx> {
                     OpCode::StoreLocal(idx) => self.o_store_local(idx),
                     OpCode::LoadLocal(idx) => self.o_load_local(idx),
                     OpCode::BINOP(op) => self.o_binop(op),
+                    OpCode::CBINOP(op) => self.o_cbinop(op),
 
                     OpCode::BORROW(..) => {
                         let address = self.stack.pop().unwrap().unwrap_address();
@@ -439,7 +440,7 @@ impl<'p, 'a, 'cx> Interpreter<'p, 'a, 'cx> {
             // println!("{:?} [{}]", self.w_stack[self.w_stack_pointer], self.w_stack_pointer);
             // println!("[{}] --{:?}", self.w_stack.len(), self.w_stack_pointer, );
             // println!("");
-            println!("Execute {:?}| SP {}", opcode, self.w_stack_pointer);
+            // println!("Execute {:?}| SP {}", opcode, self.w_stack_pointer);
 
             if self.is_tracing {
                 match *opcode {
@@ -467,6 +468,8 @@ impl<'p, 'a, 'cx> Interpreter<'p, 'a, 'cx> {
             }
 
             match *opcode {
+                OpCode::Noop => (),
+
                 OpCode::StackFrame(stack_size) => {
                     func_stacksize = Some(stack_size);
                     self.o_stackframe(stack_size);
@@ -617,6 +620,7 @@ impl<'p, 'a, 'cx> Interpreter<'p, 'a, 'cx> {
                 OpCode::StoreLocal(idx) => self.o_store_local(idx),
                 OpCode::LoadLocal(idx) => self.o_load_local(idx),
                 OpCode::BINOP(op) => self.o_binop(op),
+                OpCode::CBINOP(op) => self.o_cbinop(op),
 
                 OpCode::BORROW(..) => {
                     let address = self.stack.pop().unwrap().unwrap_address();
@@ -816,6 +820,15 @@ impl<'p, 'a, 'cx> Interpreter<'p, 'a, 'cx> {
         self.stack.push(StackData::Pointer(Address::StackLocal(self.w_stack_pointer + idx)))
     }
 
+    fn o_cbinop(&mut self, op: BinOp) {
+        let mut tuple = WrappedTuple::with_size(2);
+        self.o_binop(op);
+        tuple.data[0] = self.pop_stack_value();
+        // false == no error
+        tuple.data[1] = WrappedValue::Bool(false);
+        self.stack.push(StackData::Value(WrappedValue::Tuple(tuple)));
+    }
+
     fn o_binop(&mut self, op: BinOp) {
         use self::WrappedValue::*;
         use rustc::mir::repr::BinOp::*;
@@ -875,7 +888,7 @@ impl<'p, 'a, 'cx> Interpreter<'p, 'a, 'cx> {
             },
 
             (l, r) => {
-                println!("{:?} {:?}", l, r);
+                println!("XXX: {:?} {:?}", l, r);
                 unimplemented!();
             }
         });
